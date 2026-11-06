@@ -76,6 +76,12 @@ class Profiles(unittest.TestCase):
         self.assertIn("SK65 Studio", str(self.saved[0]))
 
 
+class Version(unittest.TestCase):
+    def test_installer_default_matches_the_app(self):
+        script = (Path(__file__).resolve().parent / "installer.iss").read_text(encoding="utf-8")
+        self.assertIn(f'#define AppVersion "{s.APP_VERSION}"', script)
+
+
 class SingleInstance(unittest.TestCase):
     def setUp(self):
         self.saved = s.INSTANCE_NAME
@@ -197,6 +203,21 @@ class Tray(unittest.TestCase):
         entry[1](0, 0)
         self.assertTrue(self.app.profile["tray"])
         self.app.set_page("configure")
+
+    def test_settings_page_shows_the_version(self):
+        rows = []
+        original = self.app.control_row
+
+        def spy(surf, img, w, label, detail=None, *args):
+            rows.append((label, detail))
+            return original(surf, img, w, label, detail, *args)
+
+        self.app.control_row = spy
+        self.app.set_page("settings")
+        self.spin(0.2)
+        del self.app.control_row
+        self.app.set_page("configure")
+        self.assertIn(("Version", s.APP_VERSION), rows)
 
     def test_checkbox_saves_before_a_crash_could_lose_it(self):
         saved = []

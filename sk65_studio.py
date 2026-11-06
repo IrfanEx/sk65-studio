@@ -41,6 +41,7 @@ import tkinter as tk
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageTk
 
 APP_NAME = "Womier SK65 Studio"
+APP_VERSION = "1.4.0"  # the release workflow refuses a tag that differs
 
 # Patched by the build script with the detected config interface.
 DEFAULT_VID = "0x0603"
@@ -1343,6 +1344,7 @@ class App(ctk.CTk):
         self._toggle(img, x1 - round(46 * S), cy - round(23 * S) // 2, self.profile["tray"])
         surf.hit((x0, cy - round(25 * S), x1, cy + round(25 * S)), lambda _x, _y: self.toggle_tray(), key="tray",
                  tip="Minimizing hides the app in the system tray instead of the taskbar. Click the tray icon to open it.")
+        self.control_row(surf, img, w, "Version", APP_VERSION)
 
     def control_row(self, surf, img, w, label, detail=None, color=None, mark=None):
         """VIA ControlRow: 50px line, label left, detail right, hairline below."""

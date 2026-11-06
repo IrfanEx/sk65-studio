@@ -6,7 +6,7 @@
 
 #define AppName "Womier SK65 Studio"
 #ifndef AppVersion
-  #define AppVersion "1.3.0"
+  #define AppVersion "1.4.0"
 #endif
 #define AppExe "Womier_SK65_Studio.exe"
 
