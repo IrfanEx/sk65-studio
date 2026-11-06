@@ -110,6 +110,14 @@ is probably the knob press. This is inferred, not tested.
 Knob rotation appears nowhere in the vendor app or its 102 position matrix, so it has
 no known firmware setting. Software remapping is the only known way to change it.
 
+Confirmed on the board: each step sends report 3 with usage `EA` (left) or `E9` (right),
+then `00` on release, and pressing sends `E2`. The knob has no LEDs.
+
+Windows turns these into `VK_VOLUME_DOWN`, `VK_VOLUME_UP` and `VK_VOLUME_MUTE`, and a
+low-level keyboard hook sees them flagged as injected, with scan code 0 and no sign of
+which device sent them. Any device's volume keys look the same, so the app matches each
+key against the board's own report, which lands within a millisecond of it.
+
 ### Lighting: `07 02`
 
 | Offset | Value |

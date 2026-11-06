@@ -29,6 +29,7 @@ import queue
 import re
 import sys
 import threading
+import time
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog
@@ -218,7 +219,10 @@ LAYER_NAMES = ("Base", "Fn", "Fn2")
 
 # Windows reports the stock knob as these media keys.
 KNOB_SOURCES = {"ccw": 0xAE, "cw": 0xAF, "press": 0xAD}
+KNOB_VKS = set(KNOB_SOURCES.values())
 KNOB_USAGES = {0xEA: "ccw", 0xE9: "cw", 0xE2: "press"}
+KNOB_MATCH_SECONDS = 0.03  # longest wait for the board's report matching a media key
+SELF_INPUT_TAG = 0x534B3635  # marks key presses this app sends
 KNOB_LABELS = {"ccw": "Rotate Counterclockwise", "cw": "Rotate Clockwise", "press": "Press Encoder"}
 KNOB_DEFAULTS = {"ccw": "volume down", "cw": "volume up", "press": "volume mute"}
 EFFECTS = ["Static", "Breathing", "Wave", "Spectrum", "Reactive", "Off"]
@@ -463,7 +467,8 @@ def send_key(vk: int, down: bool) -> None:
     flags = 0 if down else KEYEVENTF_KEYUP
     if vk in EXTENDED_VKS:
         flags |= KEYEVENTF_EXTENDEDKEY
-    event = INPUT(type=1, u=_INPUTUNION(ki=KEYBDINPUT(vk, user32.MapVirtualKeyW(vk, 0), flags, 0, 0)))
+    key = KEYBDINPUT(vk, user32.MapVirtualKeyW(vk, 0), flags, 0, SELF_INPUT_TAG)
+    event = INPUT(type=1, u=_INPUTUNION(ki=key))
     user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(INPUT))
 
 
@@ -482,9 +487,39 @@ class Engine:
         self.remap_on = False
         self.capture = False
         self.accept_injected = False  # tests only
+        self.knob_open = False
+        self.knob_time = 0.0
+        self.knob_signal = threading.Event()
+        self.held = set()
         self._proc = HOOKPROC(self._on_event)
         self._thread = None
         self._tid = None
+
+    def note_knob(self) -> None:
+        self.knob_time = time.monotonic()
+        self.knob_signal.set()
+
+    def _from_this_board(self) -> bool:
+        """Windows reports media keys from every device the same way, with no
+        source. The board's own HID report lands within a millisecond either
+        side of the key, so wait briefly for it. Without this a headset's
+        volume wheel would be remapped too."""
+        if not self.knob_open:
+            return True
+        self.knob_signal.wait(KNOB_MATCH_SECONDS)
+        self.knob_signal.clear()
+        return time.monotonic() - self.knob_time < KNOB_MATCH_SECONDS * 3
+
+    def _should_remap(self, vk: int, injected: bool, down: bool) -> bool:
+        if vk not in KNOB_VKS:
+            return self.accept_injected or not injected
+        if down and vk not in self.held and self._from_this_board():
+            self.held.add(vk)
+        if down:
+            return vk in self.held
+        was_held = vk in self.held
+        self.held.discard(vk)
+        return was_held
 
     def set_map(self, remaps: dict, knob: dict) -> None:
         mapping = {}
@@ -527,12 +562,16 @@ class Engine:
         try:
             if code == 0:
                 event = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-                if self.accept_injected or not event.flags & LLKHF_INJECTED:
-                    down = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
-                    if self.capture:
-                        self.post(("key", event.vkCode, down))
-                    if self.remap_on and event.vkCode in self.map:
-                        self._perform(self.map[event.vkCode], down)
+                vk = event.vkCode
+                injected = bool(event.flags & LLKHF_INJECTED)
+                down = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                # Keys this app sends must not be remapped again: the knob's
+                # own events are injected too, so a swap would loop forever.
+                if event.dwExtraInfo != SELF_INPUT_TAG:
+                    if self.capture and (self.accept_injected or not injected):
+                        self.post(("key", vk, down))
+                    if self.remap_on and vk in self.map and self._should_remap(vk, injected, down):
+                        self._perform(self.map[vk], down)
                         return 1
         except Exception as e:  # must never escape into the OS hook chain
             self.post(("hook_error", str(e)))
@@ -551,10 +590,11 @@ class KnobReader(threading.Thread):
     """Reads the board's consumer-control interface. Windows still gets the
     same reports, so this only observes."""
 
-    def __init__(self, path: bytes, post):
+    def __init__(self, path: bytes, post, on_press):
         super().__init__(daemon=True)
         self.path = path
         self.post = post
+        self.on_press = on_press  # called right here: the keyboard hook is waiting on it
         self.stopping = False
 
     def run(self):
@@ -565,6 +605,8 @@ class KnobReader(threading.Thread):
             while not self.stopping:
                 data = dev.read(8, 200)
                 if data:
+                    if len(data) >= 3 and data[0] == PROTOCOL["consumer_report"] and (data[1] or data[2]):
+                        self.on_press()
                     self.post(("knob_report", list(data)))
         except (OSError, ValueError) as e:
             self.post(("knob_channel", False, str(e)))
@@ -1844,6 +1886,7 @@ class App(ctk.CTk):
             self.say(f"Keyboard hook failed: {ev[1]}")
         elif kind == "knob_channel":
             self.knob_channel = (ev[1], f"Listening on report {PROTOCOL['consumer_report']}" if ev[1] else ev[2])
+            self.engine.knob_open = ev[1]
             if not ev[1]:
                 self.reader = None
             self.content.invalidate()
@@ -1875,11 +1918,12 @@ class App(ctk.CTk):
                 self._stop_reader()
                 self.checks = {"config": None, "firmware": None}
                 self.knob_channel = None
+                self.engine.knob_open = False
 
     def _start_reader(self):
         match = next((d for d in self.devices if d["usage_page"] == PROTOCOL["consumer_page"]), None)
         if match and not self.reader:
-            self.reader = KnobReader(match["path"], self.events.put_nowait)
+            self.reader = KnobReader(match["path"], self.events.put_nowait, self.engine.note_knob)
             self.reader.start()
 
     def _stop_reader(self):

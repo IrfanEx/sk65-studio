@@ -71,6 +71,7 @@ Run the tests, which never touch a real keyboard:
 .venv\Scripts\python test_layers.py
 .venv\Scripts\python test_lighting.py
 .venv\Scripts\python test_tray.py
+.venv\Scripts\python test_knob.py
 ```
 
 Build the exe, then compile [`installer.iss`](installer.iss) with Inno Setup:
