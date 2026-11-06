@@ -1,0 +1,27 @@
+{
+  "vid": "0x0603",
+  "pid": "0x0351",
+  "usage_page": "0xFF02",
+  "remap_on": false,
+  "remaps": [
+    {},
+    {},
+    {}
+  ],
+  "flashed": [
+    {},
+    {},
+    {}
+  ],
+  "knob": {
+    "ccw": "volume down",
+    "cw": "volume up",
+    "press": "volume mute"
+  },
+  "lighting": {
+    "effect": "wave",
+    "color": "multi",
+    "brightness": 80,
+    "speed": 45
+  }
+}
