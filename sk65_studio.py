@@ -13,7 +13,8 @@ What works today:
   * Live connection monitor and self-test.
   * Knob monitor: reads the keyboard's consumer-control interface directly, so
     a knob event is proven to come from this board.
-  * Key tester, HID console, profiles in sk65_profile.json.
+  * Key tester, HID console, profiles stored in %APPDATA%\\SK65 Studio.
+  * Optional minimize to the system tray, with one running copy at a time.
 
 The firmware has no known setting for knob rotation, so the knob stays software.
 """
@@ -23,6 +24,7 @@ from __future__ import annotations
 import ctypes
 import json
 import math
+import os
 import queue
 import re
 import sys
@@ -33,6 +35,7 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 import hid
+import pystray
 import tkinter as tk
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageTk
 
@@ -72,7 +75,7 @@ ICON_FONT = "segmdl2.ttf"
 GLYPH_KEYBOARD, GLYPH_TEST, GLYPH_USB = "\uE765", "\uE9D9", "\uE88E"
 GLYPH_LIGHT, GLYPH_SAVE, GLYPH_CONSOLE = "\uEA80", "\uE74E", "\uE756"
 
-GLYPH_CHECK, GLYPH_CROSS = chr(0xE73E), chr(0xE711)
+GLYPH_CHECK, GLYPH_CROSS, GLYPH_SETTINGS = chr(0xE73E), chr(0xE711), chr(0xE713)
 SYMBOL_FONT = "seguisym.ttf"
 
 EXTENDED_VKS = set(range(0x21, 0x29)) | {0x2C, 0x2D, 0x2E, 0x5B, 0x5C, 0x5D, 0xA3, 0xA5} | set(range(0xA6, 0xB8))
@@ -232,7 +235,9 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-PROFILE_PATH = app_dir() / "sk65_profile.json"
+# Settings live with the user, so they survive updates and uninstalling.
+PROFILE_PATH = Path(os.environ.get("APPDATA") or app_dir()) / "SK65 Studio" / "sk65_profile.json"
+LEGACY_PROFILE_PATH = app_dir() / "sk65_profile.json"
 ICON_PATH = Path(getattr(sys, "_MEIPASS", app_dir())) / "assets" / "via.ico"
 
 
@@ -246,6 +251,7 @@ def default_profile() -> dict:
         "pid": DEFAULT_PID,
         "usage_page": DEFAULT_USAGE_PAGE,
         "remap_on": False,
+        "tray": False,
         "remaps": empty_layers(),  # one dict per layer, source key to keycode
         "flashed": empty_layers(),  # keymap last saved into the keyboard; it cannot be read back
         "knob": dict(KNOB_DEFAULTS),
@@ -284,13 +290,16 @@ def read_profile(path: Path) -> dict:
 
 
 def load_profile() -> dict:
-    try:
-        return read_profile(PROFILE_PATH)
-    except (OSError, ValueError):
-        return default_profile()
+    for path in (PROFILE_PATH, LEGACY_PROFILE_PATH):
+        try:
+            return read_profile(path)
+        except (OSError, ValueError):
+            pass
+    return default_profile()
 
 
 def save_profile(profile: dict, path: Path = PROFILE_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(profile, indent=2), encoding="utf-8")
 
 
@@ -394,6 +403,32 @@ user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
 user32.MapVirtualKeyW.restype = wintypes.UINT
 kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+kernel32.CreateMutexW.restype = wintypes.HANDLE
+kernel32.CreateEventW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR)
+kernel32.CreateEventW.restype = wintypes.HANDLE
+kernel32.OpenEventW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+kernel32.OpenEventW.restype = wintypes.HANDLE
+kernel32.SetEvent.argtypes = (wintypes.HANDLE,)
+kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+kernel32.WaitForSingleObject.restype = wintypes.DWORD
+
+# installer.iss names the same mutex, so Setup can ask to close a running copy.
+INSTANCE_NAME = "WomierSK65Studio"
+ERROR_ALREADY_EXISTS, EVENT_MODIFY_STATE, INFINITE = 183, 0x0002, 0xFFFFFFFF
+_instance_mutex = None
+
+
+def first_instance() -> bool:
+    """False when a copy already runs, after asking that copy to show itself."""
+    global _instance_mutex
+    _instance_mutex = kernel32.CreateMutexW(None, False, INSTANCE_NAME)
+    if ctypes.get_last_error() != ERROR_ALREADY_EXISTS:
+        return True
+    event = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, INSTANCE_NAME + "Show")
+    if event:
+        kernel32.SetEvent(event)
+    return False
 
 WH_KEYBOARD_LL, WM_QUIT = 13, 0x0012
 WM_KEYDOWN, WM_SYSKEYDOWN = 0x0100, 0x0104
@@ -557,6 +592,26 @@ class Monitor(threading.Thread):
                 self.post(("status", f"USB scan failed: {e}"))
             self.wake.wait(2.0)
             self.wake.clear()
+
+
+class Tray:
+    """Tray icon on its own thread, so clicks reach the app through the event queue."""
+
+    def __init__(self, post):
+        self.post = post
+        self.icon = None
+
+    def start(self):
+        if not self.icon:
+            menu = pystray.Menu(pystray.MenuItem(f"Open {APP_NAME}", lambda: self.post(("show",)), default=True),
+                                pystray.MenuItem("Exit", lambda: self.post(("exit",))))
+            self.icon = pystray.Icon("sk65_studio", Image.open(ICON_PATH).convert("RGBA"), APP_NAME, menu)
+            self.icon.run_detached()
+
+    def stop(self):
+        if self.icon:
+            self.icon.stop()
+            self.icon = None
 
 
 def probe(devices: list[dict]) -> dict:
@@ -974,7 +1029,9 @@ class App(ctk.CTk):
         self.profile = load_profile()
         self.engine = Engine(self.events.put_nowait)
         self.page = "configure"
-        self.menu_item = {"configure": "KEYMAP", "test": "KEY TEST", "device": "CONNECTION"}
+        self.menu_item = {"configure": "KEYMAP", "test": "KEY TEST", "device": "CONNECTION", "settings": "SETTINGS"}
+        self.tray = Tray(self.events.put_nowait)
+        self.hidden = False
         self.category = "basic"
         self.layer = 0
         self.enc_slot = None
@@ -1024,6 +1081,49 @@ class App(ctk.CTk):
         self.after(30, self._pump)
         self.after(50, self._animate)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Unmap>", self._on_unmap)
+        self.apply_tray()
+        threading.Thread(target=self._wait_for_second_launch, daemon=True).start()
+
+    def _wait_for_second_launch(self):
+        event = kernel32.CreateEventW(None, False, False, INSTANCE_NAME + "Show")
+        while event and kernel32.WaitForSingleObject(event, INFINITE) == 0:
+            self.events.put_nowait(("show",))
+
+    def apply_tray(self):
+        if self.profile["tray"]:
+            try:
+                self.tray.start()
+            except (OSError, ValueError) as e:
+                self.say(f"Could not add the tray icon: {e}")
+        else:
+            self.tray.stop()
+            if self.hidden:
+                self.show_window()
+
+    def toggle_tray(self):
+        self.profile["tray"] = not self.profile["tray"]
+        self.save_quiet()
+        self.apply_tray()
+        self.content.invalidate()
+        self.say("The minimize button now sends the app to the system tray." if self.profile["tray"]
+                 else "The minimize button now works normally.")
+
+    def _on_unmap(self, event):
+        if event.widget is self:
+            self.after(20, self.hide_if_minimized)
+
+    def hide_if_minimized(self):
+        if self.tray.icon and self.state() == "iconic":
+            self.withdraw()
+            self.hidden = True
+
+    def show_window(self):
+        self.hidden = False
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        self.focus_force()
 
     def _ids(self):
         return int(self.profile["vid"], 16), int(self.profile["pid"], 16)
@@ -1031,10 +1131,11 @@ class App(ctk.CTk):
     # ---------- pages ----------
     def set_page(self, page):
         self.page = page
-        group = "" if page == "device" else "body"
-        self.body.rowconfigure(0, weight=0 if page == "device" else 5, uniform=group)
-        self.body.rowconfigure(1, weight=1 if page == "device" else 3, uniform=group)
-        if page == "device":
+        full_pane = page in ("device", "settings")
+        group = "" if full_pane else "body"
+        self.body.rowconfigure(0, weight=0 if full_pane else 5, uniform=group)
+        self.body.rowconfigure(1, weight=1 if full_pane else 3, uniform=group)
+        if full_pane:
             self.kb.grid_remove()
         else:
             self.kb.grid(row=0, column=0, sticky="nsew")
@@ -1074,9 +1175,9 @@ class App(ctk.CTk):
         S = self.S
         draw = ImageDraw.Draw(img)
         items = [("configure", GLYPH_KEYBOARD, "Configure"), ("test", GLYPH_TEST, "Key Tester"),
-                 ("device", GLYPH_USB, "Device and connection")]
+                 ("device", GLYPH_USB, "Device and connection"), ("settings", GLYPH_SETTINGS, "Settings")]
         bw, bh, gap = round(40 * S), round(35 * S), round(20 * S)
-        x = (w - (bw * 3 + gap * 2)) // 2
+        x = (w - (bw * len(items) + gap * (len(items) - 1))) // 2
         y = (h - bh) // 2
         for page, glyph, tip in items:
             selected = page == self.page
@@ -1130,6 +1231,7 @@ class App(ctk.CTk):
             "configure": [("KEYMAP", GLYPH_KEYBOARD), ("LIGHTING", GLYPH_LIGHT), ("SAVE + LOAD", GLYPH_SAVE)],
             "test": [("KEY TEST", GLYPH_TEST)],
             "device": [("CONNECTION", GLYPH_USB), ("HID CONSOLE", GLYPH_CONSOLE)],
+            "settings": [("SETTINGS", GLYPH_SETTINGS)],
         }[self.page]
 
     def paint_menu(self, surf, img, w, h):
@@ -1189,7 +1291,16 @@ class App(ctk.CTk):
             self.paint_test(surf, img, w, h)
         elif item == "CONNECTION":
             self.paint_connection(surf, img, w, h)
+        elif item == "SETTINGS":
+            self.paint_settings(surf, img, w, h)
         surf.content_h = surf.top + surf.scroll + round(12 * S)
+
+    def paint_settings(self, surf, img, w, h):
+        S = self.S
+        x0, x1, cy = self.control_row(surf, img, w, "Minimize To System Tray")
+        self._toggle(img, x1 - round(46 * S), cy - round(23 * S) // 2, self.profile["tray"])
+        surf.hit((x0, cy - round(25 * S), x1, cy + round(25 * S)), lambda _x, _y: self.toggle_tray(), key="tray",
+                 tip="Minimizing hides the app in the system tray instead of the taskbar. Click the tray icon to open it.")
 
     def control_row(self, surf, img, w, label, detail=None, color=None, mark=None):
         """VIA ControlRow: 50px line, label left, detail right, hairline below."""
@@ -1740,6 +1851,10 @@ class App(ctk.CTk):
             self._on_knob(ev[1])
         elif kind == "written":
             self.on_written(ev[1], ev[2])
+        elif kind == "show":
+            self.show_window()
+        elif kind == "exit":
+            self._on_close()
         elif kind == "key":
             self._on_key(ev[1], ev[2])
 
@@ -1801,7 +1916,9 @@ class App(ctk.CTk):
 
     def _animate(self):
         kb = self.kb
-        if kb.selected and self.page == "configure":
+        if self.hidden:
+            pass
+        elif kb.selected and self.page == "configure":
             kb.phase += 0.35
             kb.invalidate()
         if kb.knob_flash > 0:
@@ -1815,9 +1932,10 @@ class App(ctk.CTk):
         self._stop_reader()
         self.engine.remap_on = self.engine.capture = False
         self.engine.stop()
+        self.tray.stop()
         self.save_quiet()
         self.destroy()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and first_instance():
     App().mainloop()

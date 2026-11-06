@@ -10,10 +10,13 @@ This is an unofficial community project. It is not affiliated with or endorsed b
 
 1. Open the [latest release](../../releases/latest).
 2. Download `Womier_SK65_Studio_Setup.exe` and run it.
+3. Click through the installer. You only do this once.
 
-Needs 64-bit Windows 10 or 11. To run it without installing, download `Womier_SK65_Studio.exe` instead.
+Needs 64-bit Windows 10 or 11.
 
-The files are not code signed, so Windows may show a SmartScreen warning. Choose **More info**, then **Run anyway**. Some antivirus tools may flag the app because it uses a keyboard hook. Each release lists SHA-256 hashes, and you can build it yourself from this source.
+After that, open **Womier SK65 Studio** from the Start menu, by searching for it, or from the desktop shortcut. To remove it, use **Settings > Apps > Installed apps** or Programs and Features in Control Panel. Your settings stay in `%APPDATA%\SK65 Studio`, so they survive updates and reinstalling.
+
+The installer is not code signed, so Windows may show a SmartScreen warning. Choose **More info**, then **Run anyway**. Some antivirus tools may flag the app because it uses a keyboard hook. Each release lists a SHA-256 hash, and you can build it yourself from this source.
 
 ## Which keyboards work
 
@@ -32,6 +35,7 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 - **Key tester:** check every key and the knob.
 - **Connection check:** a live status light and a self-test of each interface.
 - **Profiles:** save and load layouts as JSON files.
+- **System tray:** turn on **Minimize To System Tray** on the Settings page, and the minimize button hides the app in the tray. Click the tray icon to bring it back, or right-click it to exit.
 
 ## Good to know
 
@@ -40,6 +44,7 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 - **The knob's rotation has no known firmware setting.** Its actions run in software, so keep **REMAP** on and the app open.
 - **Some actions can't be stored in the keyboard:** Mute, Calculator, Search and mouse wheel.
 - **Fn itself is handled by the firmware**, so Windows never sees it.
+- **Only one copy runs at a time.** Opening the app again brings back the running copy, even from the tray.
 - **Keys dark?** Press Fn+Space. It switches RGB off in the keyboard, and the app can't turn it back on.
 - **Something went wrong?** Hold Fn+Esc for 3 seconds to factory reset the keyboard.
 
@@ -64,12 +69,13 @@ Run the tests, which never touch a real keyboard:
 ```bash
 .venv\Scripts\python test_layers.py
 .venv\Scripts\python test_lighting.py
+.venv\Scripts\python test_tray.py
 ```
 
 Build the exe, then compile [`installer.iss`](installer.iss) with Inno Setup:
 
 ```bash
-.venv\Scripts\pyinstaller --noconfirm --onefile --windowed --uac-admin --icon "assets\via.ico" --add-data "assets\via.ico;assets" --name "Womier_SK65_Studio" sk65_studio.py
+.venv\Scripts\pyinstaller --noconfirm --onefile --windowed --uac-admin --icon "assets\via.ico" --add-data "assets\via.ico;assets" --hidden-import pystray._win32 --name "Womier_SK65_Studio" sk65_studio.py
 ```
 
 Pushing a `v*` tag builds both files with GitHub Actions and publishes a release.

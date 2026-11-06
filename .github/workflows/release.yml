@@ -25,23 +25,23 @@ jobs:
         run: |
           python test_layers.py
           python test_lighting.py
+          python test_tray.py
 
       - name: Build exe
-        run: pyinstaller --noconfirm --onefile --windowed --uac-admin --icon "assets\via.ico" --add-data "assets\via.ico;assets" --name "Womier_SK65_Studio" sk65_studio.py
+        run: pyinstaller --noconfirm --onefile --windowed --uac-admin --icon "assets\via.ico" --add-data "assets\via.ico;assets" --hidden-import pystray._win32 --name "Womier_SK65_Studio" sk65_studio.py
 
       - name: Build installer
         run: |
           choco install innosetup -y --no-progress
           $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup*\ISCC.exe" | Select-Object -First 1
-          & $iscc.FullName installer.iss
+          if ("$env:GITHUB_REF_NAME" -match '^v(\d+\.\d+\.\d+)$') { & $iscc.FullName "/DAppVersion=$($Matches[1])" installer.iss }
+          else { & $iscc.FullName installer.iss }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4
         with:
           name: installer
-          path: |
-            dist/Womier_SK65_Studio_Setup.exe
-            dist/Womier_SK65_Studio.exe
+          path: dist/Womier_SK65_Studio_Setup.exe
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
@@ -49,16 +49,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $setup = (Get-FileHash dist\Womier_SK65_Studio_Setup.exe -Algorithm SHA256).Hash.ToLower()
-          $portable = (Get-FileHash dist\Womier_SK65_Studio.exe -Algorithm SHA256).Hash.ToLower()
           $notes = @"
           For the Womier SK65 V1 (USB 0603:0351) on Windows 10 or 11, 64-bit.
 
-          Download **Womier_SK65_Studio_Setup.exe** and run it. These files are not code signed, so Windows may show a SmartScreen warning: choose More info, then Run anyway. See the README for why the app asks for administrator rights.
+          Download **Womier_SK65_Studio_Setup.exe** and run it once. It installs the app with Start menu and desktop shortcuts, and it appears in Control Panel. The installer is not code signed, so Windows may show a SmartScreen warning: choose More info, then Run anyway. See the README for why the app asks for administrator rights.
 
           Built by GitHub Actions from this tag.
 
-          SHA-256:
-          - Womier_SK65_Studio_Setup.exe: ``$setup``
-          - Womier_SK65_Studio.exe: ``$portable``
+          SHA-256 of Womier_SK65_Studio_Setup.exe: ``$setup``
           "@
-          gh release create $env:GITHUB_REF_NAME dist\Womier_SK65_Studio_Setup.exe dist\Womier_SK65_Studio.exe --title "SK65 Studio $env:GITHUB_REF_NAME" --notes ($notes -replace '(?m)^ +', '')
+          gh release create $env:GITHUB_REF_NAME dist\Womier_SK65_Studio_Setup.exe --title "SK65 Studio $env:GITHUB_REF_NAME" --notes ($notes -replace '(?m)^ +', '')

@@ -2,3 +2,4 @@ customtkinter==6.0.0
 hidapi==0.15.0
 pillow==13.0.0
 pyinstaller==6.22.3
+pystray==0.19.5
