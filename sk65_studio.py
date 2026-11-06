@@ -41,7 +41,7 @@ import tkinter as tk
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageTk
 
 APP_NAME = "Womier SK65 Studio"
-APP_VERSION = "1.5.2"  # the release workflow refuses a tag that differs
+APP_VERSION = "1.5.3"  # the release workflow refuses a tag that differs
 
 # Patched by the build script with the detected config interface.
 DEFAULT_VID = "0x0603"
@@ -419,33 +419,14 @@ def macro_slots(layers: list[dict]) -> dict:
     return slots
 
 
-def macro_playback(macro: dict) -> tuple[int, list]:
-    """The repeat value and steps that play this macro. Measured on the board,
-    with a macro that outlasts a tap: value 1 plays once but stops when the key
-    is released, 2 plays once in full, and 3 and 4 play that many times. So
-    "once" is sent as 2, and "twice" has no value of its own and needs the
-    steps sent twice."""
-    steps = macro["steps"]
-    if macro["held"]:
-        return MACRO_REPEAT_HELD, steps
-    if macro["repeat"] == 1:
-        return 2, steps
-    if macro["repeat"] > 2:
-        return macro["repeat"], steps
-    if len(steps) * 2 > MACRO_MAX_STEPS:
-        raise ValueError(f"A macro over {MACRO_MAX_STEPS // 2} steps can't run exactly twice. "
-                         "Use Once, or 3 times or more.")
-    return 2, steps + steps
-
-
 def build_macro_packet(slot: int, macro: dict) -> bytes:
-    """Report 7 "07 05": at offset 8, a 2-byte repeat value, then 3 bytes per
+    """Report 7 "07 05": at offset 8, a 2-byte repeat count, then 3 bytes per
     step. The top bit of a step's delay means the key goes down."""
     packet = bytearray(PROTOCOL["config_size"])
     packet[:4] = bytes((7, 5, 1, slot))
-    repeat, steps = macro_playback(macro)
+    repeat = MACRO_REPEAT_HELD if macro["held"] else macro["repeat"]
     data = bytearray((repeat >> 8, repeat & 0xFF))
-    for key, down, delay in steps:
+    for key, down, delay in macro["steps"]:
         delay = MACRO_MIN_DELAY if macro["fixed"] else max(MACRO_MIN_DELAY, min(MACRO_MAX_DELAY, delay))
         data += bytes(((delay >> 8) | (0x80 if down else 0), delay & 0xFF, FIRMWARE_CODES[key]))
     packet[8:8 + len(data)] = data
@@ -1619,7 +1600,7 @@ class App(ctk.CTk):
             ("less", "-", False, lambda: self.change_repeat(-1), "Run it fewer times"),
             ("count", f"{count} times" if count != "1" else "Once", False, None, ""),
             ("more", "+", False, lambda: self.change_repeat(1), "Run it more times"),
-            ("held", "While Held", macro["held"], self.toggle_held, "Repeat until you let go of the key"),
+            ("held", "While Held", macro["held"], self.toggle_held, "Repeat until you let go. It stops the moment you release, even partway through."),
         ])
 
         _x0, x1, cy = self.control_row(surf, img, w, "Timing")
