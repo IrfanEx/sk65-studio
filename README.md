@@ -35,6 +35,7 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 - **Macros:** record up to 10 macros of up to 80 steps, set how they repeat, put them on any key on any layer, and save them into the keyboard.
 - **Knob:** assign rotate left, rotate right and press, including mouse wheel actions.
 - **Lighting:** effect, colour, brightness and speed apply as soon as you change them.
+- **Custom lighting:** paint any colour onto each key, row or the whole board, with 5 presets. Your design is saved in the keyboard.
 - **Key tester:** check every key and the knob.
 - **Connection check:** a live status light and a self-test of each interface.
 - **Profiles:** save and load layouts as JSON files.
@@ -78,6 +79,7 @@ Run the tests, which never touch a real keyboard:
 .venv\Scripts\python test_tray.py
 .venv\Scripts\python test_knob.py
 .venv\Scripts\python test_macros.py
+.venv\Scripts\python test_custom.py
 ```
 
 Build the exe, then compile [`installer.iss`](installer.iss) with Inno Setup:

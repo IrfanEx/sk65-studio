@@ -21,6 +21,7 @@ The firmware has no known setting for knob rotation, so the knob stays software.
 
 from __future__ import annotations
 
+import colorsys
 import ctypes
 import json
 import math
@@ -41,7 +42,7 @@ import tkinter as tk
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageTk
 
 APP_NAME = "Womier SK65 Studio"
-APP_VERSION = "1.5.3"  # the release workflow refuses a tag that differs
+APP_VERSION = "1.6.0"  # the release workflow refuses a tag that differs
 
 # Patched by the build script with the detected config interface.
 DEFAULT_VID = "0x0603"
@@ -239,12 +240,17 @@ KNOB_MATCH_SECONDS = 0.03  # longest wait for the board's report matching a medi
 SELF_INPUT_TAG = 0x534B3635  # marks key presses this app sends
 KNOB_LABELS = {"ccw": "Rotate Counterclockwise", "cw": "Rotate Clockwise", "press": "Press Encoder"}
 KNOB_DEFAULTS = {"ccw": "volume down", "cw": "volume up", "press": "volume mute"}
-EFFECTS = ["Static", "Breathing", "Wave", "Spectrum", "Reactive", "Off"]
-EFFECT_IDS = {"static": 1, "breathing": 2, "wave": 0, "spectrum": 4, "reactive": 6, "off": 1}
+EFFECTS = ["Static", "Breathing", "Wave", "Spectrum", "Reactive", "Off", "Custom"]
+EFFECT_IDS = {"static": 1, "breathing": 2, "wave": 0, "spectrum": 4, "reactive": 6, "off": 1, "custom": 19}
 # The firmware's colour slots, in order. Slot 7 is multicolour.
 SWATCHES = ["#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FFFFFF"]
 MULTICOLOR = "multi"
 LIGHT_DELAY_MS = 250  # settle time after a lighting change before sending
+PAINT_DELAY_MS = 500  # longer while painting, so a drag ends up as one write
+CUSTOM_PRESETS = 5
+CUSTOM_DEFAULT_COLOR = "#FF6010"
+LIGHT_KEYS = [k["id"] for k in KEYS if k["id"] != "knob"]  # the knob has no LED
+BRUSHES = [("key", "Key"), ("row", "Row"), ("all", "All")]
 
 
 def app_dir() -> Path:
@@ -268,6 +274,30 @@ def empty_macros() -> list[dict]:
     return [{"steps": [], "repeat": 1, "held": False, "fixed": False} for _ in MACRO_IDS]
 
 
+def default_custom() -> dict:
+    """Each preset maps key ids to "#RRGGBB". A key that isn't listed stays off."""
+    return {"preset": 0, "color": CUSTOM_DEFAULT_COLOR, "presets": [{} for _ in range(CUSTOM_PRESETS)]}
+
+
+def valid_color(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", value) is not None
+
+
+def clean_custom(value) -> dict:
+    clean = default_custom()
+    if not isinstance(value, dict):
+        return clean
+    if valid_color(value.get("color")):
+        clean["color"] = value["color"].upper()
+    if value.get("preset") in range(CUSTOM_PRESETS):
+        clean["preset"] = value["preset"]
+    presets = value.get("presets")
+    for preset, data in zip(clean["presets"], presets if isinstance(presets, list) else []):
+        if isinstance(data, dict):
+            preset.update({k: c.upper() for k, c in data.items() if k in LIGHT_KEYS and valid_color(c)})
+    return clean
+
+
 def default_profile() -> dict:
     return {
         "vid": DEFAULT_VID,
@@ -279,6 +309,7 @@ def default_profile() -> dict:
         "flashed": empty_layers(),  # keymap last saved into the keyboard; it cannot be read back
         "macros": empty_macros(),
         "flashed_macros": empty_macros(),
+        "custom": default_custom(),
         "knob": dict(KNOB_DEFAULTS),
         "lighting": {"effect": "wave", "color": MULTICOLOR, "brightness": 80, "speed": 45},
     }
@@ -331,6 +362,7 @@ def read_profile(path: Path) -> dict:
         profile[field] = clean_layers(profile[field])
     for field in ("macros", "flashed_macros"):
         profile[field] = clean_macros(profile[field])
+    profile["custom"] = clean_custom(profile["custom"])
     profile["knob"] = {**KNOB_DEFAULTS, **{k: v for k, v in profile["knob"].items()
                                            if k in KNOB_DEFAULTS and v in KC and v != "fn2" and v not in MACRO_IDS}}
     if profile["lighting"]["color"] not in SWATCHES:
@@ -451,12 +483,30 @@ def build_lighting_packet(light: dict) -> bytes:
     packet[9] = EFFECT_IDS[effect]
     packet[10] = 0 if effect == "off" else round(light["brightness"] / 25)
     packet[11] = 1 + round(light["speed"] / 25)
+    if effect == "custom":
+        return bytes(packet)  # its colours come from "07 07"
     if light["color"] in SWATCHES:
         slot = SWATCHES.index(light["color"])
     else:
         slot = 0 if effect in ("static", "off") else 7  # Fixed-on has no multicolour mode
     packet[12:32] = bytes((slot,)) * 20
     return bytes(packet)
+
+
+def build_custom_packet(colors: dict) -> bytes:
+    """Report 7 "07 07": R, G, B per matrix position, for the Customize effect."""
+    packet = bytearray(PROTOCOL["config_size"])
+    packet[:2] = bytes((7, 7))
+    for key, color in colors.items():
+        offset = 8 + 3 * MATRIX.index(KEY_TO_MATRIX.get(key, key))  # only "fn" isn't in the map
+        packet[offset:offset + 3] = bytes(rgb(color))
+    return bytes(packet)
+
+
+def build_lighting_packets(light: dict, custom: dict) -> tuple:
+    if light["effect"] == "custom":
+        return build_lighting_packet(light), build_custom_packet(custom["presets"][custom["preset"]])
+    return (build_lighting_packet(light),)
 
 
 def write_report(devices: list[dict], page: int, packet: bytes) -> None:
@@ -776,7 +826,7 @@ def probe(devices: list[dict]) -> dict:
 
 
 # ---------- drawing ----------
-_fonts, _masks, _knobs, _rings = {}, {}, {}, {}
+_fonts, _masks, _knobs, _rings, _sv_cache, _hue_cache = {}, {}, {}, {}, {}, {}
 
 
 def font(size: float, bold=False, name=None) -> ImageFont.FreeTypeFont:
@@ -867,6 +917,33 @@ def knob_sprite(size: int) -> Image.Image:
         img.paste((197, 167, 150), (0, 0), disc_mask(s, 0.74))
         _knobs[size] = img.resize((size, size), Image.LANCZOS)
     return _knobs[size]
+
+
+def picker_from(color: str) -> tuple:
+    return colorsys.rgb_to_hsv(*(c / 255 for c in rgb(color)))
+
+
+def sv_square(hue: float, w: int, h: int) -> Image.Image:
+    """Saturation left to right, brightness bottom to top. Computed small and
+    scaled up, and kept for the last hue so dragging stays smooth."""
+    key = (round(hue, 3), w, h)
+    if _sv_cache.get("key") != key:
+        small = Image.new("RGB", (32, 24))
+        px = small.load()
+        for y in range(24):
+            for x in range(32):
+                px[x, y] = tuple(round(c * 255) for c in colorsys.hsv_to_rgb(hue, x / 31, 1 - y / 23))
+        _sv_cache.update(key=key, image=small.resize((w, h), Image.BICUBIC))
+    return _sv_cache["image"]
+
+
+def hue_strip(w: int, h: int) -> Image.Image:
+    if (w, h) not in _hue_cache:
+        small = Image.new("RGB", (120, 1))
+        for x in range(120):
+            small.putpixel((x, 0), tuple(round(c * 255) for c in colorsys.hsv_to_rgb(x / 119, 1, 1)))
+        _hue_cache[(w, h)] = small.resize((w, h), Image.BICUBIC)
+    return _hue_cache[(w, h)]
 
 
 def knob_ring(size: int) -> Image.Image:
@@ -1013,9 +1090,18 @@ class KeyboardView(Surface):
                 self._draw_knob(img, rect, *caps)
             elif caps:
                 self._draw_key(img, rect, key, pitch, self._cap(key), *caps)
+            if app.painting():
+                self.hit(rect, self._paint_at if kid != "knob" else None, key=kid, drag=True,
+                         tip="The knob has no lights" if kid == "knob" else "Click or drag to paint")
+                continue
             tip = self._tip(kid)
             self.hit(rect, (lambda x, y, k=kid: app.key_clicked(k)) if app.page == "test" or app.selectable(kid) else None,
                      key=kid, tip=tip)
+
+    def _paint_at(self, x, y):
+        entry = self._find(x, y)
+        if entry and entry[2] != "knob":
+            self.app.paint_key(entry[2])
 
     def _paint_layers(self, img):
         """VIA's layer control: the selected layer on the accent, the rest bare."""
@@ -1091,6 +1177,14 @@ class KeyboardView(Surface):
         """Returns (face, legend) overrides, or None for the cached look."""
         app = self.app
         accent_key = key["accent"]
+        if app.painting():
+            if kid == "knob":
+                return (None, None)
+            face = rgb(app.custom_colors().get(kid, "#000000"))
+            if self.hover == kid:
+                face = blend(face, "#FFFFFF", 0.2)
+            bright = 0.3 * face[0] + 0.6 * face[1] + 0.1 * face[2] > 110
+            return (face if any(face) else rgb(JET)), (INSIDE_ACCENT if bright else LIGHT_GREY)
         if app.page == "configure" and self.selected == kid:
             t = 0.5 + 0.5 * math.sin(self.phase)
             c = ACCENT if not accent_key else "#FFFFFF"
@@ -1165,6 +1259,8 @@ class App(ctk.CTk):
         self.tray = Tray(self.events.put_nowait)
         self.hidden = False
         self.category = "basic"
+        self.brush = "key"
+        self.picker = picker_from(self.profile["custom"]["color"])
         self.macro_index = 0
         self.recording = False
         self.record_held = set()
@@ -1394,6 +1490,7 @@ class App(ctk.CTk):
     def set_menu(self, name):
         if self.recording:
             self.stop_record()
+        self.kb.invalidate()
         self.menu_item[self.page] = name
         self.layout_lower()
 
@@ -1716,6 +1813,17 @@ class App(ctk.CTk):
             draw.text(((box[0] + box[2]) / 2, cy), name, fill=rgb(color), font=f, anchor="mm")
             surf.hit(box, lambda _x, _y, n=name: self.set_light(effect=n.lower()), key=name)
             x -= bw + round(4 * S)
+        if light["effect"] == "custom":
+            self.paint_custom(surf, img, w)
+        else:
+            self.paint_builtin_light(surf, img, w, light)
+        _x0, x1, cy = self.control_row(surf, img, w, "Keyboard Lighting")
+        box = self.accent_button(surf, img, x1, cy, "Send Again", self.send_lighting, enabled=self.can_write())
+        text, color = self.light_status
+        draw.text((box[0] - round(14 * S), cy), text, fill=rgb(color), font=font(18 * S), anchor="rm")
+
+    def paint_builtin_light(self, surf, img, w, light):
+        S = self.S
         for key in ("brightness", "speed"):
             self.slider_row(surf, img, w, key.title(), key)
         x0, x1, cy = self.control_row(surf, img, w, "Color")
@@ -1732,17 +1840,137 @@ class App(ctk.CTk):
             surf.hit(box, lambda _x, _y, col=c: self.set_light(color=col), key=c,
                      tip="Multicolour" if c == MULTICOLOR else c)
             x -= r * 2 + round(10 * S)
-        _x0, x1, cy = self.control_row(surf, img, w, "Keyboard Lighting")
-        box = self.accent_button(surf, img, x1, cy, "Send Again", self.send_lighting, enabled=self.can_write())
-        text, color = self.light_status
-        draw.text((box[0] - round(14 * S), cy), text, fill=rgb(color), font=font(18 * S), anchor="rm")
+
+    def paint_custom(self, surf, img, w):
+        """Colour picker on the left, preset and paint options on the right."""
+        S = self.S
+        custom = self.profile["custom"]
+        draw = ImageDraw.Draw(img)
+        row_w = min(w - round(40 * S), round(960 * S))
+        x0 = (w - row_w) // 2 + round(5 * S)
+        x1 = x0 + row_w - round(10 * S)
+        top = surf.top + round(12 * S)
+
+        # Saturation and brightness square, then the hue strip below it.
+        hue, sat, val = self.picker
+        bw, bh = round(236 * S), round(116 * S)
+        img.paste(sv_square(hue, bw, bh), (x0, top))
+        mark = (x0 + sat * bw, top + (1 - val) * bh)
+        draw.ellipse((mark[0] - 6 * S, mark[1] - 6 * S, mark[0] + 6 * S, mark[1] + 6 * S), outline=(255, 255, 255), width=2)
+
+        def pick_sv(x, y):
+            self.set_picker(sat=max(0.0, min(1.0, (x - x0) / bw)), val=max(0.0, 1.0 - min(1.0, max(0.0, (y - top) / bh))))
+
+        surf.hit((x0, top, x0 + bw, top + bh), pick_sv, key="sv", drag=True, tip="Choose how strong and bright the colour is")
+        strip = top + bh + round(10 * S)
+        sh = round(16 * S)
+        img.paste(hue_strip(bw, sh), (x0, strip))
+        hx = x0 + round(hue * bw)
+        draw.rectangle((hx - 2, strip - 2, hx + 2, strip + sh + 2), fill=(255, 255, 255))
+
+        def pick_hue(x, _y):
+            self.set_picker(hue=max(0.0, min(0.999, (x - x0) / bw)))
+
+        surf.hit((x0, strip - 4, x0 + bw, strip + sh + 4), pick_hue, key="hue", drag=True, tip="Choose the colour")
+
+        # Right side: one line each, drawn by hand so they sit beside the picker.
+        label_x = x0 + bw + round(32 * S)
+        step = round(40 * S)
+        lines = [top + round(14 * S) + i * step for i in range(4)]
+        for y, label in zip(lines, ("Preset", "Paint", "Color", "Brightness")):
+            draw.text((label_x, y), label, fill=rgb(MEDIUM_GREY), font=font(18 * S), anchor="lm")
+        self.option_chips(surf, img, x1, lines[0], [
+            (f"preset{i}", f"P{i + 1}", i == custom["preset"], lambda n=i: self.select_preset(n), f"Preset {i + 1}")
+            for i in range(CUSTOM_PRESETS)])
+        self.option_chips(surf, img, x1, lines[1], [
+            (f"brush {brush}", label, self.brush == brush, lambda b=brush: self.set_brush(b),
+             f"Clicking a key paints {'that key' if brush == 'key' else 'its row' if brush == 'row' else 'every key'}")
+            for brush, label in BRUSHES])
+        left = self.option_chips(surf, img, x1, lines[2], [
+            ("type color", "Type", False, self.type_color, "Type a colour code, like #FF6010"),
+            ("black", "Off", custom["color"] == "#000000", lambda: self.set_color("#000000"), "Paint keys dark"),
+        ])
+        draw.text((left - round(6 * S), lines[2]), custom["color"], fill=rgb(LIGHT_GREY), font=font(16 * S), anchor="rm")
+        r = round(11 * S)
+        sx = label_x + round(62 * S)
+        rrect(img, (sx, lines[2] - r, sx + r * 2, lines[2] + r), r, DARK_GREY)
+        rrect(img, (sx + 2, lines[2] - r + 2, sx + r * 2 - 2, lines[2] + r - 2), r - 2, custom["color"])
+        self.slider(surf, img, x1 - round(220 * S), x1, lines[3], "brightness")
+        surf.top = max(strip + sh, lines[3]) + round(24 * S)
+
+    def custom_colors(self):
+        custom = self.profile["custom"]
+        return custom["presets"][custom["preset"]]
+
+    def painting(self):
+        return (self.page == "configure" and self.menu_item["configure"] == "LIGHTING"
+                and self.profile["lighting"]["effect"] == "custom")
+
+    def set_picker(self, hue=None, sat=None, val=None):
+        h, s, v = self.picker
+        self.picker = (h if hue is None else hue, s if sat is None else sat, v if val is None else val)
+        red, green, blue = colorsys.hsv_to_rgb(*self.picker)
+        self.profile["custom"]["color"] = f"#{round(red * 255):02X}{round(green * 255):02X}{round(blue * 255):02X}"
+        self.save_quiet()
+        self.content.invalidate()
+
+    def set_color(self, color):
+        self.profile["custom"]["color"] = color
+        self.picker = picker_from(color)
+        self.save_quiet()
+        self.content.invalidate()
+
+    def type_color(self):
+        text = ctk.CTkInputDialog(text="Colour code, like #FF6010", title="Custom colour").get_input()
+        if text:
+            color = "#" + text.strip().lstrip("#").upper()
+            if valid_color(color):
+                self.set_color(color)
+            else:
+                self.say("That isn't a colour code. Use 6 characters, like #FF6010.")
+
+    def set_brush(self, brush):
+        self.brush = brush
+        self.content.invalidate()
+
+    def select_preset(self, index):
+        self.profile["custom"]["preset"] = index
+        self.custom_changed()
+
+    def fill_empty_preset(self):
+        colors = self.custom_colors()
+        if not colors:
+            colors.update({key: self.profile["custom"]["color"] for key in LIGHT_KEYS})
+
+    def paint_key(self, kid):
+        color = self.profile["custom"]["color"]
+        if self.brush == "all":
+            targets = LIGHT_KEYS
+        elif self.brush == "row":
+            row = next(key["y"] for key in KEYS if key["id"] == kid)
+            targets = [key["id"] for key in KEYS if key["y"] == row and key["id"] != "knob"]
+        else:
+            targets = [kid]
+        colors = self.custom_colors()
+        if any(colors.get(key) != color for key in targets):
+            colors.update({key: color for key in targets})
+            self.custom_changed()
+
+    def custom_changed(self):
+        self.fill_empty_preset()
+        self.save_quiet()
+        self.kb.invalidate()
+        self.content.invalidate()
+        self.schedule_light(PAINT_DELAY_MS)
 
     def slider_row(self, surf, img, w, label, key):
+        _x0, x1, cy = self.control_row(surf, img, w, label)
+        self.slider(surf, img, x1 - round(300 * self.S), x1, cy, key)
+
+    def slider(self, surf, img, tx0, x1, cy, key):
         S = self.S
-        x0, x1, cy = self.control_row(surf, img, w, label)
         value = self.profile["lighting"][key]
-        tw = round(300 * S)
-        tx0 = x1 - tw
+        tw = x1 - tx0
         k = tx0 + tw * value // 100
         h = round(3 * S)
         rrect(img, (tx0, cy - h, x1, cy + h), h, DARK_GREY)
@@ -1760,18 +1988,24 @@ class App(ctk.CTk):
         light.update(patch)
         if light["effect"] == "static" and light["color"] == MULTICOLOR:
             light["color"] = SWATCHES[0]  # the firmware's Fixed-on has no multicolour mode
+        if light["effect"] == "custom":
+            self.fill_empty_preset()
         self.save_quiet()
         self.content.invalidate()
+        self.kb.invalidate()
+        self.schedule_light(LIGHT_DELAY_MS)
+
+    def schedule_light(self, delay):
         if self.light_job:
             self.after_cancel(self.light_job)
-        self.light_job = self.after(LIGHT_DELAY_MS, self.apply_light)
+        self.light_job = self.after(delay, self.apply_light)
 
     def apply_light(self, force=False):
         """Sends the lighting like VIA does, as soon as it changes. Each write
-        lands in the keyboard's flash, so repeats of the last packet are skipped."""
+        lands in the keyboard's flash, so repeats of the last packets are skipped."""
         self.light_job = None
-        packet = build_lighting_packet(self.profile["lighting"])
-        if packet == self.light_sent and not force:
+        packets = build_lighting_packets(self.profile["lighting"], self.profile["custom"])
+        if packets == self.light_sent and not force:
             return
         if not self.connected:
             self.light_status = ("Keyboard not connected", ERROR)
@@ -1779,9 +2013,9 @@ class App(ctk.CTk):
         elif self.writing:
             self.light_pending = True
         else:
-            self.light_writing = packet
+            self.light_writing = packets
             self.light_status = ("Sending", MEDIUM_GREY)
-            self.start_write("lighting", packet)
+            self.start_write("lighting", *packets)
 
     def paint_saveload(self, surf, img, w, h):
         self.control_row(surf, img, w, "Keyboard Memory", self.memory_status())
@@ -2061,8 +2295,11 @@ class App(ctk.CTk):
         if error:
             self.say(f"Keyboard did not accept the write: {error}")
         elif kind == "lighting":
-            p = self.light_writing
-            self.say(f"Lighting sent: effect {p[9]}, brightness {p[10]} of 4, speed {p[11]} of 5, colour slot {p[12]}.")
+            p = self.light_writing[0]
+            if len(self.light_writing) > 1:
+                self.say(f"Custom lighting sent: preset {self.profile['custom']['preset'] + 1}, brightness {p[10]} of 4.")
+            else:
+                self.say(f"Lighting sent: effect {p[9]}, brightness {p[10]} of 4, speed {p[11]} of 5, colour slot {p[12]}.")
         else:
             self.profile["flashed"] = self.writing_layers
             self.profile["flashed_macros"] = self.writing_macros

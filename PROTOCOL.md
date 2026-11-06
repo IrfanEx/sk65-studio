@@ -7,8 +7,8 @@ come from the HID descriptors of a live board.
 Tested on a real SK65 V1 (2026-11-06): the `07 03` keymap write, moving `PgDn` to
 `End` through the app's Save Into Keyboard Memory, a Fn layer key, `Fn+J` to `Home`,
 and a Fn2 layer key reached through a key set to Fn2, the same way. The `07 02` lighting
-write is confirmed too: effects, speed and colour slots. Every other write below is
-decoded but not yet confirmed on hardware.
+write is confirmed too: effects, speed and colour slots. So are `07 05` macros and `07 07`
+per-key colour. Every other write below is decoded but not yet confirmed on hardware.
 
 ## Interfaces (USB 0603:0351, product string "lucky65")
 
@@ -177,6 +177,12 @@ visible effect. The vendor app has no command for this, so only Fn+Space restore
 ### Per-key colour: `07 07`
 
 Offset 8: 3 bytes R, G, B per matrix position (`8 + 3 * position`). Used with effect 19.
+
+Send `07 02` with effect 19 first, then this report 100 ms or more later, as the vendor app
+does. Confirmed on the board: colours land on the right keys, including Fn and Space at
+`mspace`, any RGB value works, byte 10 of `07 02` still sets brightness, and the design
+survives unplugging. It doesn't animate. The built-in effects only take the 7 colour
+slots above, so an exact colour needs this report.
 
 ### Short commands (report 8, page FF03)
 

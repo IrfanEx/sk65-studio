@@ -193,7 +193,7 @@ Changes reach the keyboard as soon as you make them.
 
 | Setting | What it does |
 |---|---|
-| **Effect** | The animation. **Off** turns the lights off |
+| **Effect** | The animation. **Off** turns the lights off, and **Custom** lets you paint your own |
 | **Brightness** | Has 5 levels, so small slider moves may not change anything |
 | **Speed** | Further right is faster |
 | **Color** | One colour, or the rainbow circle for multicolour |
@@ -202,6 +202,32 @@ Changes reach the keyboard as soon as you make them.
 **Static** can't be multicolour, so it switches to red if multicolour was selected.
 
 If the keys stay dark, press **Fn+Space**. It switches RGB off inside the keyboard, and the app can't turn it back on.
+
+### Custom lighting
+
+Paint any colour onto any key. The picture of the board shows your colours as you go, and the keyboard follows about half a second later.
+
+![Custom lighting](images/custom-lighting.png)
+
+1. In **LIGHTING**, click **Custom**.
+2. Choose a colour. Pick the shade on the rainbow strip, then click in the square to set how strong and bright it is. Or click **Type** and enter a code like `#FF6010`.
+3. Choose how much to paint under **Paint**: **Key**, **Row** or **All**.
+4. Click keys on the picture. With **Key**, you can also drag across several.
+
+| Option | What it does |
+|---|---|
+| **P1** to **P5** | Five separate designs. Clicking one sends it to the keyboard. An empty one starts filled with your current colour |
+| **Off** | Picks black, which leaves painted keys dark |
+| **Brightness** | Dims or brightens the whole design |
+
+Your design is saved in the keyboard, so it stays after you close the app or unplug the keyboard. The keyboard holds one design at a time, and the other presets stay in the app.
+
+Good to know:
+
+- Custom lighting doesn't animate. Effects like Wave and Breathing can only use the keyboard's 7 built-in colours.
+- Colours on the keyboard won't exactly match your screen.
+- To go back to an effect, click it in the **Effect** row, or press **Fn+\\**. Your presets stay in the app, and **Send Again** on **Custom** puts your design back.
+- Saving a keymap doesn't change your lighting.
 
 ## Backups and resetting
 
