@@ -45,12 +45,13 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 - **Some actions can't be stored in the keyboard:** Mute, Calculator, Search and mouse wheel.
 - **Fn itself is handled by the firmware**, so Windows never sees it.
 - **Only one copy runs at a time.** Opening the app again brings back the running copy, even from the tray.
+- **Admin windows ignore software remaps.** Windows hides key presses from normal apps while an app running as administrator is in focus, so the knob falls back to its default there. Keys saved into the keyboard always work.
 - **Keys dark?** Press Fn+Space. It switches RGB off in the keyboard, and the app can't turn it back on.
 - **Something went wrong?** Hold Fn+Esc for 3 seconds to factory reset the keyboard.
 
 ## Privacy and permissions
 
-The app asks for administrator rights because of how it is packaged (`--uac-admin`), and so its software remap also works in other elevated windows.
+Installing asks for administrator rights once, to write to Program Files. The app itself runs as a normal user.
 
 It uses a Windows keyboard hook only while REMAP is on or the Key Tester or Connection page is open. Key presses are used on your computer and never stored or sent anywhere. The app makes no network connections. Everything it does is in [`sk65_studio.py`](sk65_studio.py).
 
@@ -75,7 +76,7 @@ Run the tests, which never touch a real keyboard:
 Build the exe, then compile [`installer.iss`](installer.iss) with Inno Setup:
 
 ```bash
-.venv\Scripts\pyinstaller --noconfirm --onefile --windowed --uac-admin --icon "assets\via.ico" --add-data "assets\via.ico;assets" --hidden-import pystray._win32 --name "Womier_SK65_Studio" sk65_studio.py
+.venv\Scripts\pyinstaller --noconfirm --onefile --windowed --icon "assets\via.ico" --add-data "assets\via.ico;assets" --hidden-import pystray._win32 --name "Womier_SK65_Studio" sk65_studio.py
 ```
 
 Pushing a `v*` tag builds both files with GitHub Actions and publishes a release.

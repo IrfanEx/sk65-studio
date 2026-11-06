@@ -1,12 +1,12 @@
 ; Inno Setup script for Womier SK65 Studio.
 ; Build the exe first:
-;   pyinstaller --noconfirm --onefile --windowed --uac-admin --icon "assets\via.ico" --add-data "assets\via.ico;assets" --hidden-import pystray._win32 --name "Womier_SK65_Studio" sk65_studio.py
+;   pyinstaller --noconfirm --onefile --windowed --icon "assets\via.ico" --add-data "assets\via.ico;assets" --hidden-import pystray._win32 --name "Womier_SK65_Studio" sk65_studio.py
 ; Then compile with: ISCC.exe installer.iss
 ; Releases pass the tag's version with /DAppVersion=x.y.z
 
 #define AppName "Womier SK65 Studio"
 #ifndef AppVersion
-  #define AppVersion "1.1.0"
+  #define AppVersion "1.2.0"
 #endif
 #define AppExe "Womier_SK65_Studio.exe"
 
@@ -43,4 +43,4 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent shellexec
+Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
