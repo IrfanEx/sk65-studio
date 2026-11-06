@@ -2,7 +2,9 @@
 
 A VIA-style configurator for the **Womier SK65 V1**, a keyboard that has no VIA support. Remap keys on every layer, set up the knob and control the lighting from one window, and store your keymap in the keyboard itself.
 
-![SK65 Studio](docs/screenshot.png)
+![SK65 Studio](docs/images/keymap.png)
+
+**New here? Read the [user manual](docs/MANUAL.md).**
 
 This is an unofficial community project. It is not affiliated with or endorsed by Womier, Weikav or the VIA team.
 
