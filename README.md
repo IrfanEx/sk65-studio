@@ -30,6 +30,7 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 ## Features
 
 - **Keymap:** edit the base, Fn and Fn2 layers, and save them into the keyboard's memory.
+- **Macros:** record up to 10 macros of up to 80 steps, set how they repeat, put them on any key on any layer, and save them into the keyboard.
 - **Knob:** assign rotate left, rotate right and press, including mouse wheel actions.
 - **Lighting:** effect, colour, brightness and speed apply as soon as you change them.
 - **Key tester:** check every key and the knob.
@@ -43,6 +44,8 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 - **The keyboard can't be read back.** The app remembers what it last saved, but it can't see changes made elsewhere.
 - **The knob's rotation has no known firmware setting.** Its actions run in software, so keep **REMAP** on and the app open.
 - **Some actions can't be stored in the keyboard:** Mute, Calculator, Search and mouse wheel.
+- **Macros run from the keyboard**, so a macro key only works after you save it. The knob can't run macros, and macros can't contain media keys or mouse actions.
+- **Recording a macro replaces what was in that slot**, and steps can't be edited one by one yet, so record again to change one.
 - **Fn itself is handled by the firmware**, so Windows never sees it.
 - **Only one copy runs at a time.** Opening the app again brings back the running copy, even from the tray.
 - **Admin windows ignore software remaps.** Windows hides key presses from normal apps while an app running as administrator is in focus, so the knob falls back to its default there. Keys saved into the keyboard always work.
@@ -72,6 +75,7 @@ Run the tests, which never touch a real keyboard:
 .venv\Scripts\python test_lighting.py
 .venv\Scripts\python test_tray.py
 .venv\Scripts\python test_knob.py
+.venv\Scripts\python test_macros.py
 ```
 
 Build the exe, then compile [`installer.iss`](installer.iss) with Inno Setup:

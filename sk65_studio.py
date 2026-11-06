@@ -5,8 +5,8 @@ The SK65 V1 is a Lucky65 V1 with a knob in place of Insert. It enumerates as
 USB 0603:0351 with the product string "lucky65".
 
 What works today:
-  * Saving all three keymap layers (base, Fn, Fn2) and lighting into the
-    keyboard's memory, using the vendor protocol documented in PROTOCOL.md.
+  * Saving all three keymap layers (base, Fn, Fn2), macros and lighting into
+    the keyboard's memory, using the vendor protocol documented in PROTOCOL.md.
   * Software remapping of base layer keys and the knob with a native low-level
     keyboard hook. It is active while the app runs and needs no firmware
     support. Windows never sees the Fn key, so software cannot do Fn layers.
@@ -41,7 +41,7 @@ import tkinter as tk
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageTk
 
 APP_NAME = "Womier SK65 Studio"
-APP_VERSION = "1.4.0"  # the release workflow refuses a tag that differs
+APP_VERSION = "1.5.0"  # the release workflow refuses a tag that differs
 
 # Patched by the build script with the detected config interface.
 DEFAULT_VID = "0x0603"
@@ -78,6 +78,16 @@ GLYPH_KEYBOARD, GLYPH_TEST, GLYPH_USB = "\uE765", "\uE9D9", "\uE88E"
 GLYPH_LIGHT, GLYPH_SAVE, GLYPH_CONSOLE = "\uEA80", "\uE74E", "\uE756"
 
 GLYPH_CHECK, GLYPH_CROSS, GLYPH_SETTINGS = chr(0xE73E), chr(0xE711), chr(0xE713)
+GLYPH_MACRO = chr(0xE768)
+
+# Limits from the vendor software. Its recorder stops at 80 steps, and 80 fit in
+# the 256 bytes it sends per macro.
+MACRO_COUNT = 10
+MACRO_MAX_STEPS = 80
+MACRO_MIN_DELAY, MACRO_MAX_DELAY = 20, 32767
+MACRO_MAX_REPEAT = 65534
+MACRO_REPEAT_HELD = 0xFFFF  # the firmware repeats until the key is released
+WRITE_GAP_SECONDS = 0.2  # the vendor app's pause between macro reports
 SYMBOL_FONT = "seguisym.ttf"
 
 EXTENDED_VKS = set(range(0x21, 0x29)) | {0x2C, 0x2D, 0x2E, 0x5B, 0x5C, 0x5D, 0xA3, 0xA5} | set(range(0xA6, 0xB8))
@@ -134,10 +144,13 @@ KEYCODES = [
     ("wheel left", "Whl ←", None, "special", "Mouse wheel left"),
     ("wheel right", "Whl →", None, "special", "Mouse wheel right"),
     ("fn2", "Fn2", None, "special", "Fn2: hold this key to reach layer 2"),
+] + [
+    (f"macro{i}", f"M{i}", None, "macro", f"Macro {i}") for i in range(MACRO_COUNT)
 ]
 KC = {k[0]: k for k in KEYCODES}
 KC_BY_VK = {k[2]: k for k in KEYCODES if k[2] is not None}
-CATEGORIES = [("basic", "BASIC"), ("media", "MEDIA"), ("special", "SPECIAL")]
+MACRO_IDS = [f"macro{i}" for i in range(MACRO_COUNT)]
+CATEGORIES = [("basic", "BASIC"), ("media", "MEDIA"), ("special", "SPECIAL"), ("macro", "MACRO")]
 WHEEL_ACTIONS = {"wheel up": (0x0800, 120), "wheel down": (0x0800, -120),
                  "wheel left": (0x1000, -120), "wheel right": (0x1000, 120)}
 
@@ -250,6 +263,11 @@ def empty_layers() -> list[dict]:
     return [{} for _ in LAYER_NAMES]
 
 
+def empty_macros() -> list[dict]:
+    """Steps are [key id, pressed?, ms since the step before]."""
+    return [{"steps": [], "repeat": 1, "held": False, "fixed": False} for _ in MACRO_IDS]
+
+
 def default_profile() -> dict:
     return {
         "vid": DEFAULT_VID,
@@ -259,6 +277,8 @@ def default_profile() -> dict:
         "tray": False,
         "remaps": empty_layers(),  # one dict per layer, source key to keycode
         "flashed": empty_layers(),  # keymap last saved into the keyboard; it cannot be read back
+        "macros": empty_macros(),
+        "flashed_macros": empty_macros(),
         "knob": dict(KNOB_DEFAULTS),
         "lighting": {"effect": "wave", "color": MULTICOLOR, "brightness": 80, "speed": 45},
     }
@@ -267,7 +287,29 @@ def default_profile() -> dict:
 def storable(layer: int, code: str) -> bool:
     """Can this keycode live on this layer of the keyboard's memory? Layers 1
     and 2 have no software fallback, and Fn2 is only reached from layer 0."""
-    return code in FIRMWARE_CODES and (layer == 0 or code != "fn2")
+    return (code in FIRMWARE_CODES or code in MACRO_IDS) and (layer == 0 or code != "fn2")
+
+
+def macro_key(key: str) -> bool:
+    """Macros hold plain keyboard usages. Media codes are translated separately
+    by the firmware, so they are left out rather than trusted to work."""
+    code = FIRMWARE_CODES.get(key, 0)
+    return 0 < code < 0xA0 or 0xE0 <= code <= 0xE7
+
+
+def clean_macros(value) -> list[dict]:
+    clean = empty_macros()
+    for macro, data in zip(clean, value if isinstance(value, list) else []):
+        if not isinstance(data, dict):
+            continue
+        steps = data.get("steps")
+        if isinstance(steps, list):
+            macro["steps"] = [[s[0], bool(s[1]), max(0, int(s[2]))] for s in steps[:MACRO_MAX_STEPS]
+                              if isinstance(s, list) and len(s) == 3 and macro_key(s[0])]
+        macro["repeat"] = max(1, min(MACRO_MAX_REPEAT, int(data.get("repeat", 1))))
+        macro["held"] = bool(data.get("held"))
+        macro["fixed"] = bool(data.get("fixed"))
+    return clean
 
 
 def clean_layers(value) -> list[dict]:
@@ -287,8 +329,10 @@ def read_profile(path: Path) -> dict:
     profile.update({k: v for k, v in data.items() if k in profile})
     for field in ("remaps", "flashed"):
         profile[field] = clean_layers(profile[field])
+    for field in ("macros", "flashed_macros"):
+        profile[field] = clean_macros(profile[field])
     profile["knob"] = {**KNOB_DEFAULTS, **{k: v for k, v in profile["knob"].items()
-                                           if k in KNOB_DEFAULTS and v in KC and v != "fn2"}}
+                                           if k in KNOB_DEFAULTS and v in KC and v != "fn2" and v not in MACRO_IDS}}
     if profile["lighting"]["color"] not in SWATCHES:
         profile["lighting"]["color"] = MULTICOLOR
     return profile
@@ -348,6 +392,7 @@ def build_keymap_packet(layers: list[dict]) -> bytes:
                for src, dst in remaps.items() if src not in KEY_TO_MATRIX or not storable(n, dst)]
     if refused:
         raise ValueError("Keyboard memory cannot store: " + ", ".join(refused))
+    slots = macro_slots(layers)
     packet = bytearray(PROTOCOL["config_size"])
     packet[:3] = bytes((7, 3, 1))
     stride = len(MATRIX) * 2
@@ -358,8 +403,44 @@ def build_keymap_packet(layers: list[dict]) -> bytes:
             packet[start + position * 2 + 1] = MATRIX_DEFAULTS[position]
         for src, dst in layer_keys(layers, layer).items():
             offset = start + MATRIX.index(KEY_TO_MATRIX[src]) * 2
-            packet[offset:offset + 2] = bytes((0x80, FIRMWARE_CODES[dst]))
+            code = 0xF0 + slots[dst] if dst in slots else FIRMWARE_CODES[dst]
+            packet[offset:offset + 2] = bytes((0x80, code))
     return bytes(packet)
+
+
+def macro_slots(layers: list[dict]) -> dict:
+    """Firmware slots are numbered in order of use, as the vendor app does, so
+    only macros that a key runs are stored."""
+    slots = {}
+    for layer in range(len(LAYER_NAMES)):
+        for dst in layer_keys(layers, layer).values():
+            if dst in MACRO_IDS and dst not in slots:
+                slots[dst] = len(slots)
+    return slots
+
+
+def build_macro_packet(slot: int, macro: dict) -> bytes:
+    """Report 7 "07 05": at offset 8, a 2-byte repeat count, then 3 bytes per
+    step. The top bit of a step's delay means the key goes down."""
+    packet = bytearray(PROTOCOL["config_size"])
+    packet[:4] = bytes((7, 5, 1, slot))
+    repeat = MACRO_REPEAT_HELD if macro["held"] else macro["repeat"]
+    data = bytearray((repeat >> 8, repeat & 0xFF))
+    for key, down, delay in macro["steps"]:
+        delay = MACRO_MIN_DELAY if macro["fixed"] else max(MACRO_MIN_DELAY, min(MACRO_MAX_DELAY, delay))
+        data += bytes(((delay >> 8) | (0x80 if down else 0), delay & 0xFF, FIRMWARE_CODES[key]))
+    packet[8:8 + len(data)] = data
+    return bytes(packet)
+
+
+def build_save_packets(layers: list[dict], macros: list[dict]) -> list[bytes]:
+    """Everything one save sends: the keymap first, then each macro a key uses."""
+    keymap = build_keymap_packet(layers)
+    slots = macro_slots(layers)
+    empty = [KC[code][4] for code in slots if not macros[MACRO_IDS.index(code)]["steps"]]
+    if empty:
+        raise ValueError(f"Record these before saving, because a key uses them: {', '.join(empty)}")
+    return [keymap] + [build_macro_packet(slot, macros[MACRO_IDS.index(code)]) for code, slot in slots.items()]
 
 
 def build_lighting_packet(light: dict) -> bytes:
@@ -406,6 +487,9 @@ user32.GetMessageW.argtypes = (ctypes.POINTER(wintypes.MSG), wintypes.HWND, wint
 user32.PostThreadMessageW.argtypes = (wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
 user32.MapVirtualKeyW.restype = wintypes.UINT
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+user32.GetAncestor.restype = wintypes.HWND
 kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
@@ -435,7 +519,7 @@ def first_instance() -> bool:
         kernel32.SetEvent(event)
     return False
 
-WH_KEYBOARD_LL, WM_QUIT = 13, 0x0012
+WH_KEYBOARD_LL, WM_QUIT, GA_ROOT = 13, 0x0012, 2
 WM_KEYDOWN, WM_SYSKEYDOWN = 0x0100, 0x0104
 LLKHF_INJECTED = 0x10
 KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP = 0x1, 0x2
@@ -488,6 +572,7 @@ class Engine:
         self.remap_on = False
         self.capture = False
         self.accept_injected = False  # tests only
+        self.record_window = None  # while recording a macro, keys typed in this window go to it
         self.knob_open = False
         self.knob_time = 0.0
         self.knob_signal = threading.Event()
@@ -534,7 +619,7 @@ class Engine:
         self.map = mapping
 
     def sync(self) -> None:
-        want = self.remap_on or self.capture
+        want = self.remap_on or self.capture or self.record_window
         if want and not self._thread:
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
@@ -569,6 +654,10 @@ class Engine:
                 # Keys this app sends must not be remapped again: the knob's
                 # own events are injected too, so a swap would loop forever.
                 if event.dwExtraInfo != SELF_INPUT_TAG:
+                    # Swallowed so a recorded Win or Alt+Tab doesn't also act on the desktop.
+                    if self.record_window and not injected and user32.GetForegroundWindow() == self.record_window:
+                        self.post(("record", vk, down, event.time))
+                        return 1
                     if self.capture and (self.accept_injected or not injected):
                         self.post(("key", vk, down))
                     if self.remap_on and vk in self.map and self._should_remap(vk, injected, down):
@@ -1076,6 +1165,11 @@ class App(ctk.CTk):
         self.tray = Tray(self.events.put_nowait)
         self.hidden = False
         self.category = "basic"
+        self.macro_index = 0
+        self.recording = False
+        self.record_held = set()
+        self.record_last = None
+        self.writing_macros = empty_macros()
         self.layer = 0
         self.enc_slot = None
         self.status_text = ""
@@ -1157,6 +1251,8 @@ class App(ctk.CTk):
             self.after(20, self.hide_if_minimized)
 
     def hide_if_minimized(self):
+        if self.recording:
+            self.stop_record()
         if self.tray.icon and self.state() == "iconic":
             self.withdraw()
             self.hidden = True
@@ -1173,6 +1269,8 @@ class App(ctk.CTk):
 
     # ---------- pages ----------
     def set_page(self, page):
+        if self.recording:
+            self.stop_record()
         self.page = page
         full_pane = page in ("device", "settings")
         group = "" if full_pane else "body"
@@ -1271,7 +1369,8 @@ class App(ctk.CTk):
     # ---------- left menu and submenu ----------
     def menu_items(self):
         return {
-            "configure": [("KEYMAP", GLYPH_KEYBOARD), ("LIGHTING", GLYPH_LIGHT), ("SAVE + LOAD", GLYPH_SAVE)],
+            "configure": [("KEYMAP", GLYPH_KEYBOARD), ("MACROS", GLYPH_MACRO), ("LIGHTING", GLYPH_LIGHT),
+                          ("SAVE + LOAD", GLYPH_SAVE)],
             "test": [("KEY TEST", GLYPH_TEST)],
             "device": [("CONNECTION", GLYPH_USB), ("HID CONSOLE", GLYPH_CONSOLE)],
             "settings": [("SETTINGS", GLYPH_SETTINGS)],
@@ -1293,6 +1392,8 @@ class App(ctk.CTk):
         draw.line((0, 0, w, 0), fill=rgb(DARK_GREY))
 
     def set_menu(self, name):
+        if self.recording:
+            self.stop_record()
         self.menu_item[self.page] = name
         self.layout_lower()
 
@@ -1326,6 +1427,8 @@ class App(ctk.CTk):
             if self.kb.selected == "knob":
                 self.paint_encoder(surf, img, w, h)
             self.paint_keycodes(surf, img, w, h)
+        elif item == "MACROS":
+            self.paint_macros(surf, img, w, h)
         elif item == "LIGHTING":
             self.paint_lighting(surf, img, w, h)
         elif item == "SAVE + LOAD":
@@ -1416,6 +1519,8 @@ class App(ctk.CTk):
     def code_refusal(self, code):
         """Why this keycode cannot go where the user is editing, or "" if it can."""
         if self.kb.selected == "knob":
+            if code in MACRO_IDS:
+                return "Macros run from the keyboard's memory. The knob is remapped in software."
             return "Fn2 only works from the keyboard's memory. The knob is remapped in software." if code == "fn2" else ""
         if code == "(default)" or self.layer == 0 or storable(self.layer, code):
             return ""
@@ -1443,6 +1548,154 @@ class App(ctk.CTk):
     def arm_slot(self, slot):
         self.enc_slot = slot
         self.content.invalidate()
+
+    # ---------- macros ----------
+    def macro(self):
+        return self.profile["macros"][self.macro_index]
+
+    def option_chips(self, surf, img, x1, cy, options):
+        """Right-aligned chips: (key, text, selected, on_click, tip). Returns the left edge."""
+        S = self.S
+        draw = ImageDraw.Draw(img)
+        f = font(16 * S)
+        x = x1
+        for key, text, selected, on_click, tip in reversed(options):
+            bw = round(f.getlength(text)) + round(18 * S)
+            box = (x - bw, cy - round(15 * S), x, cy + round(15 * S))
+            if selected:
+                rrect(img, box, round(5 * S), ACCENT)
+            color = INSIDE_ACCENT if selected else (LIGHT_GREY if surf.hover == key else MEDIUM_GREY)
+            draw.text(((box[0] + box[2]) / 2, cy), text, fill=rgb(color), font=f, anchor="mm")
+            surf.hit(box, on_click and (lambda _x, _y, fn=on_click: fn()), key=key, tip=tip)
+            x -= bw + round(4 * S)
+        return x
+
+    def paint_macros(self, surf, img, w, h):
+        S = self.S
+        macro = self.macro()
+        _x0, x1, cy = self.control_row(surf, img, w, "Macro")
+        chips = []
+        for i, code in enumerate(MACRO_IDS):
+            steps = len(self.profile["macros"][i]["steps"])
+            chips.append((code, f"M{i}", i == self.macro_index, lambda n=i: self.select_macro(n),
+                          f"Macro {i}: {steps} steps" if steps else f"Macro {i}: empty"))
+        self.option_chips(surf, img, x1, cy, chips)
+
+        _x0, x1, cy = self.control_row(surf, img, w, "Stop Recording" if self.recording else "Record")
+        draw = ImageDraw.Draw(img)
+        box = self.accent_button(surf, img, x1, cy, "Stop" if self.recording else "Record", self.toggle_record,
+                                 key="record")
+        if not self.recording:
+            box = self.accent_button(surf, img, box[0] - round(10 * S), cy, "Clear", self.clear_macro,
+                                     enabled=bool(macro["steps"]), key="clear macro")
+        status = f"Type now: {len(macro['steps'])} of {MACRO_MAX_STEPS} steps" if self.recording \
+            else f"{len(macro['steps'])} steps"
+        draw.text((box[0] - round(14 * S), cy), status, fill=rgb(ACCENT if self.recording else MEDIUM_GREY),
+                  font=font(16 * S), anchor="rm")
+
+        _x0, x1, cy = self.control_row(surf, img, w, "Repeat")
+        count = "-" if macro["held"] else str(macro["repeat"])
+        self.option_chips(surf, img, x1, cy, [
+            ("less", "-", False, lambda: self.change_repeat(-1), "Run it fewer times"),
+            ("count", f"{count} times" if count != "1" else "Once", False, None, ""),
+            ("more", "+", False, lambda: self.change_repeat(1), "Run it more times"),
+            ("held", "While Held", macro["held"], self.toggle_held, "Repeat until you let go of the key"),
+        ])
+
+        _x0, x1, cy = self.control_row(surf, img, w, "Timing")
+        self.option_chips(surf, img, x1, cy, [
+            ("recorded", "As Recorded", not macro["fixed"], lambda: self.set_fixed(False),
+             f"Keep your typing speed. The keyboard's shortest gap is {MACRO_MIN_DELAY} ms."),
+            ("fixed", f"Fixed {MACRO_MIN_DELAY} ms", macro["fixed"], lambda: self.set_fixed(True),
+             "Run every step as fast as the keyboard allows"),
+        ])
+        self.paint_macro_steps(surf, img, w, macro)
+
+    def paint_macro_steps(self, surf, img, w, macro):
+        S = self.S
+        draw = ImageDraw.Draw(img)
+        row_w = min(w - round(40 * S), round(960 * S))
+        x0, y0 = (w - row_w) // 2, surf.top + round(10 * S)
+        cw, ch = round(92 * S), round(34 * S)
+        cols = max(1, row_w // cw)
+        for i, (key, down, delay) in enumerate(macro["steps"]):
+            x, y = x0 + (i % cols) * cw, y0 + (i // cols) * ch
+            rrect(img, (x, y, x + cw - round(6 * S), y + ch - round(6 * S)), round(5 * S), DARK_GREY)
+            mid = y + (ch - round(6 * S)) / 2
+            draw.text((x + round(8 * S), mid), f"{KC[key][1].split(chr(10))[-1]} {'↓' if down else '↑'}",
+                      fill=rgb(LIGHT_GREY), font=font(13 * S), anchor="lm")
+            ms = MACRO_MIN_DELAY if macro["fixed"] else max(MACRO_MIN_DELAY, min(MACRO_MAX_DELAY, delay))
+            draw.text((x + cw - round(13 * S), mid), f"{ms}", fill=rgb(MEDIUM_GREY), font=font(11 * S), anchor="rm")
+        rows = (len(macro["steps"]) + cols - 1) // cols
+        surf.top = y0 + rows * ch
+
+    def select_macro(self, index):
+        if not self.recording:
+            self.macro_index = index
+            self.content.invalidate()
+
+    def toggle_record(self):
+        if self.recording:
+            self.stop_record()
+        else:
+            self.macro()["steps"] = []
+            self.recording = True
+            self.record_held.clear()
+            self.record_last = None
+            self.engine.record_window = user32.GetAncestor(self.winfo_id(), GA_ROOT)
+            self.engine.sync()
+            self.say("Recording. Type your macro here, then click Stop.")
+            self.content.invalidate()
+
+    def stop_record(self):
+        self.recording = False
+        self.engine.record_window = None
+        self.engine.sync()
+        steps = self.macro()["steps"]
+        for vk in sorted(self.record_held):  # a key still down at the end must come back up
+            steps.append([KC_BY_VK[vk][0], False, MACRO_MIN_DELAY])
+        self.record_held.clear()
+        self.say(f"Macro {self.macro_index} recorded: {len(steps)} steps. To use it, pick a key in KEYMAP, "
+                 f"choose M{self.macro_index} under MACRO, then Save in SAVE + LOAD.")
+        self.after_change()
+
+    def on_record(self, vk, down, ms):
+        if not self.recording:
+            return
+        code = KC_BY_VK.get(vk)
+        if not code or not macro_key(code[0]):
+            if down:
+                self.say(f"{code[4] if code else 'That key'} can't go in a macro.")
+            return
+        if down == (vk in self.record_held):
+            return  # Windows repeats a held key, and a key held before recording only comes up
+        self.record_held.add(vk) if down else self.record_held.discard(vk)
+        delay = 0 if self.record_last is None else (ms - self.record_last) & 0xFFFFFFFF
+        self.record_last = ms
+        steps = self.macro()["steps"]
+        steps.append([code[0], down, delay])
+        if len(steps) + len(self.record_held) >= MACRO_MAX_STEPS:
+            self.stop_record()
+        else:
+            self.content.invalidate()
+
+    def clear_macro(self):
+        self.macro()["steps"] = []
+        self.after_change()
+
+    def change_repeat(self, delta):
+        macro = self.macro()
+        macro["held"] = False
+        macro["repeat"] = max(1, min(MACRO_MAX_REPEAT, macro["repeat"] + delta))
+        self.after_change()
+
+    def toggle_held(self):
+        self.macro()["held"] = not self.macro()["held"]
+        self.after_change()
+
+    def set_fixed(self, fixed):
+        self.macro()["fixed"] = fixed
+        self.after_change()
 
     def paint_lighting(self, surf, img, w, h):
         S = self.S
@@ -1553,9 +1806,12 @@ class App(ctk.CTk):
             self.accent_button(surf, img, x1, cy, action, lambda: self.ask_write(kind), enabled=self.can_write())
 
     def memory_status(self):
-        saved = sum(map(len, self.profile["flashed"]))
+        profile = self.profile
+        saved = sum(map(len, profile["flashed"]))
         text = f"{saved} key{"s" if saved > 1 else ""} saved" if saved else "Factory keymap"
-        if self.profile["remaps"] != self.profile["flashed"]:
+        macros_changed = any(profile["macros"][MACRO_IDS.index(code)] != profile["flashed_macros"][MACRO_IDS.index(code)]
+                             for code in macro_slots(profile["remaps"]))
+        if profile["remaps"] != profile["flashed"] or macros_changed:
             text += ", unsaved changes"
         return text
 
@@ -1741,10 +1997,10 @@ class App(ctk.CTk):
         # Base layer only, because Windows never sees the Fn key. Once that layer
         # lives in the keyboard, a second software pass would act on keys the
         # firmware already changed. Fn2 is a firmware layer, and in software a
-        # key set to it would just go dead.
+        # key set to it would just go dead. Macros only run from the keyboard too.
         if self.profile["flashed"][0]:
             return {}
-        return {src: dst for src, dst in self.profile["remaps"][0].items() if dst != "fn2"}
+        return {src: dst for src, dst in self.profile["remaps"][0].items() if dst != "fn2" and dst not in MACRO_IDS}
 
     def sync_engine(self):
         self.engine.set_map(self.software_remaps(), self.profile["knob"])
@@ -1757,7 +2013,7 @@ class App(ctk.CTk):
     def ask_write(self, kind):
         if kind == "keymap":
             try:
-                build_keymap_packet(self.profile["remaps"])
+                build_save_packets(self.profile["remaps"], self.profile["macros"])
             except ValueError as e:
                 self.say(str(e))
                 return
@@ -1771,12 +2027,13 @@ class App(ctk.CTk):
     def confirm_write(self, kind):
         layers = self.profile["remaps"] if kind == "keymap" else empty_layers()
         self.writing_layers = [dict(layer) for layer in layers]  # exactly what this packet holds
-        self.start_write(kind, build_keymap_packet(layers))
+        self.writing_macros = json.loads(json.dumps(self.profile["macros"]))
+        self.start_write(kind, *build_save_packets(layers, self.profile["macros"]))
 
     def send_lighting(self):
         self.apply_light(force=True)
 
-    def start_write(self, kind, packet):
+    def start_write(self, kind, *packets):
         self.confirm = None
         self.writing = True
         self.content.invalidate()
@@ -1784,7 +2041,10 @@ class App(ctk.CTk):
 
         def worker():
             try:
-                write_report(devices, PROTOCOL["config_page"], packet)
+                for i, packet in enumerate(packets):
+                    if i:
+                        time.sleep(WRITE_GAP_SECONDS)
+                    write_report(devices, PROTOCOL["config_page"], packet)
                 self.events.put_nowait(("written", kind, ""))
             except (OSError, ValueError) as e:
                 self.events.put_nowait(("written", kind, str(e) or "Write failed"))
@@ -1803,6 +2063,7 @@ class App(ctk.CTk):
             self.say(f"Lighting sent: effect {p[9]}, brightness {p[10]} of 4, speed {p[11]} of 5, colour slot {p[12]}.")
         else:
             self.profile["flashed"] = self.writing_layers
+            self.profile["flashed_macros"] = self.writing_macros
             self.say("Saved to the keyboard. Press a changed key to check it, then try with this app closed."
                      if kind == "keymap" else "Saved keys removed. The keyboard is back on its factory keymap.")
         self.after_change()
@@ -1900,6 +2161,8 @@ class App(ctk.CTk):
             self.show_window()
         elif kind == "exit":
             self._on_close()
+        elif kind == "record":
+            self.on_record(ev[1], ev[2], ev[3])
         elif kind == "key":
             self._on_key(ev[1], ev[2])
 
@@ -1973,6 +2236,8 @@ class App(ctk.CTk):
         self.after(50, self._animate)
 
     def _on_close(self):
+        if self.recording:
+            self.stop_record()
         self.monitor.stopping = True
         self.monitor.wake.set()
         self._stop_reader()

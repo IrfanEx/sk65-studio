@@ -105,6 +105,26 @@ Source: [hjs-weikav-keymap-patch](https://github.com/tiger42/hjs-weikav-keymap-p
 `.` is unused. Position 93, `MUTE`, default `A2`, is not exposed by the vendor app and
 is probably the knob press. This is inferred, not tested.
 
+### Macros: `07 05`
+
+Up to 10 macros, one report each, sent after the keymap with a 200 ms gap.
+
+| Offset | Value |
+|---|---|
+| 0, 1, 2 | `07 05 01` |
+| 3 | Slot, 0 to 9 |
+| 8, 9 | Repeat, high byte first: a count from 1 to 65534, or `FFFF` to repeat until the key is released |
+| 10 | Steps, 3 bytes each |
+
+Each step is `HH LL cc`. `HH LL` is the delay in ms, 20 to 32767, and the top bit of `HH`
+means key down. `cc` is the key's HID usage. The vendor app takes the delay as the time
+since the previous step, sends 256 bytes per macro, and stops recording at 80 steps.
+
+A key runs a macro with `80 F0+slot` in the keymap. The vendor app numbers slots in the
+order keys use them and only sends macros in use, and it gives each key its own slot.
+This app also numbers them in order, but keys sharing a macro share a slot. It has no
+media or mouse steps, because the vendor app only shows how those codes reach a key.
+
 ### Knob
 
 Knob rotation appears nowhere in the vendor app or its 102 position matrix, so it has
