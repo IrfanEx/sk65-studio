@@ -43,8 +43,8 @@ class Packets(unittest.TestCase):
         self.assertEqual(packet[:8], bytes((7, 5, 1, 3, 0, 0, 0, 0)))
 
     def test_steps_match_the_vendor_layout(self):
-        packet = s.build_macro_packet(0, macro(self.STEPS, repeat=2))
-        self.assertEqual(packet[8:10], bytes((0, 2)))  # repeat, high byte first
+        packet = s.build_macro_packet(0, macro(self.STEPS, repeat=3))
+        self.assertEqual(packet[8:10], bytes((0, 3)))  # repeat, high byte first
         # Below the 20 ms minimum is raised to it; the top bit means key down.
         self.assertEqual(packet[10:13], bytes((0x80, 20, 0x04)))
         self.assertEqual(packet[13:16], bytes((300 >> 8, 300 & 0xFF, 0x04)))
@@ -54,6 +54,31 @@ class Packets(unittest.TestCase):
         packet = s.build_macro_packet(0, macro([["a", True, 90000], ["a", False, 90000]]))
         self.assertEqual(packet[10:12], bytes((0xFF, 0xFF)))
         self.assertEqual(packet[13:15], bytes((0x7F, 0xFF)))
+
+    def test_once_is_sent_as_two_so_a_tap_does_not_cut_it_off(self):
+        packet = s.build_macro_packet(0, macro(self.STEPS))
+        self.assertEqual(packet[8:10], bytes((0, 2)))
+        self.assertEqual(packet[16:], bytes(620 - 16))  # the steps are not doubled
+
+    def test_twice_is_sent_as_doubled_steps(self):
+        packet = s.build_macro_packet(0, macro(self.STEPS, repeat=2))
+        self.assertEqual(packet[8:10], bytes((0, 2)))
+        self.assertEqual(packet[10:16], packet[16:22])
+        self.assertEqual(packet[22:], bytes(620 - 22))
+
+    def test_three_or_more_are_sent_as_they_are(self):
+        for count in (3, 4, 500):
+            self.assertEqual(s.macro_playback(macro(self.STEPS, repeat=count)), (count, self.STEPS))
+
+    def test_macro_too_long_to_double_is_refused_before_saving(self):
+        steps = [["a", i % 2 == 0, 50] for i in range(s.MACRO_MAX_STEPS // 2 + 2)]
+        with self.assertRaisesRegex(ValueError, "exactly twice"):
+            s.build_save_packets(layers({"b": "macro0"}), macros(m0=macro(steps, repeat=2)))
+        self.assertEqual(s.macro_playback(macro(steps[:s.MACRO_MAX_STEPS // 2], repeat=2))[0], 2)
+
+    def test_doubled_macro_still_fits_the_vendor_buffer(self):
+        steps = [["a", i % 2 == 0, 50] for i in range(s.MACRO_MAX_STEPS // 2)]
+        self.assertEqual(len(s.macro_playback(macro(steps, repeat=2))[1]), s.MACRO_MAX_STEPS)
 
     def test_repeat_while_held_uses_the_vendor_value(self):
         packet = s.build_macro_packet(0, macro(self.STEPS, repeat=5, held=True))
@@ -84,7 +109,7 @@ class Packets(unittest.TestCase):
                                        macros(m7=macro(self.STEPS), m2=macro(self.STEPS, repeat=9), m5=macro(self.STEPS)))
         self.assertEqual([p[:2] for p in packets], [bytes((7, 3)), bytes((7, 5)), bytes((7, 5))])
         self.assertEqual([p[3] for p in packets[1:]], [0, 1])
-        self.assertEqual(packets[2][9], 9)  # slot 1 holds macro 2
+        self.assertEqual(packets[2][9], 9)  # slot 1 holds macro 2, set to run 9 times
 
     def test_empty_macro_on_a_key_is_refused(self):
         with self.assertRaisesRegex(ValueError, "Macro 3"):

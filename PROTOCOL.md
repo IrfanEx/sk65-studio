@@ -120,6 +120,19 @@ Each step is `HH LL cc`. `HH LL` is the delay in ms, 20 to 32767, and the top bi
 means key down. `cc` is the key's HID usage. The vendor app takes the delay as the time
 since the previous step, sends 256 bytes per macro, and stops recording at 80 steps.
 
+The vendor app offers "Repeats then stop" and "Release to Stop", but the repeat value does
+not simply mean a count. Measured on the board with a macro longer than a tap:
+
+| Repeat value | One quick tap | Held down |
+|---|---|---|
+| `00 01` | Stops at the release, partway through | Plays once |
+| `00 02` | Plays once in full | Plays once |
+| `00 03` | Plays 3 times | Not tested |
+| `00 04` | Plays 4 times | Not tested |
+
+This app sends `00 02` for once. It sends `00 02` with the steps doubled for twice,
+because no value plays exactly twice. `FFFF` has not been tested yet.
+
 A key runs a macro with `80 F0+slot` in the keymap. The vendor app numbers slots in the
 order keys use them and only sends macros in use, and it gives each key its own slot.
 This app also numbers them in order, but keys sharing a macro share a slot. It has no

@@ -44,7 +44,7 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 - **The keyboard can't be read back.** The app remembers what it last saved, but it can't see changes made elsewhere.
 - **The knob's rotation has no known firmware setting.** Its actions run in software, so keep **REMAP** on and the app open.
 - **Some actions can't be stored in the keyboard:** Mute, Calculator, Search and mouse wheel.
-- **Macros run from the keyboard**, so a macro key only works after you save it. The knob can't run macros, and macros can't contain media keys or mouse actions.
+- **Macros run from the keyboard**, so a macro key only works after you save it, and saving again is needed after any edit. The knob can't run macros, and macros can't contain media keys or mouse actions.
 - **Recording a macro replaces what was in that slot**, and steps can't be edited one by one yet, so record again to change one.
 - **Fn itself is handled by the firmware**, so Windows never sees it.
 - **Only one copy runs at a time.** Opening the app again brings back the running copy, even from the tray.
