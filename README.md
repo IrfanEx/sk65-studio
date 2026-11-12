@@ -36,6 +36,7 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 - **Knob:** assign rotate left, rotate right and press, including mouse wheel actions.
 - **Lighting:** effect, colour, brightness and speed apply as soon as you change them.
 - **Custom lighting:** paint any colour onto each key, row or the whole board, with 5 presets. Your design is saved in the keyboard.
+- **SignalRGB:** a plugin lets [SignalRGB](https://signalrgb.com) light each key, in sync with the rest of your setup. See [SignalRGB](#signalrgb).
 - **Key tester:** check every key and the knob.
 - **Connection check:** a live status light and a self-test of each interface.
 - **Profiles:** save and load layouts as JSON files.
@@ -54,6 +55,19 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 - **Admin windows ignore software remaps.** Windows hides key presses from normal apps while an app running as administrator is in focus, so the knob falls back to its default there. Keys saved into the keyboard always work.
 - **Keys dark?** Press Fn+Space. It switches RGB off in the keyboard, and the app can't turn it back on.
 - **Something went wrong?** Hold Fn+Esc for 3 seconds to factory reset the keyboard.
+
+## SignalRGB
+
+[`signalrgb/Womier_SK65.js`](signalrgb/Womier_SK65.js) is a SignalRGB plugin for the keyboard. SignalRGB doesn't support the SK65 V1 itself.
+
+1. Copy `Womier_SK65.js` into `Documents\WhirlwindFX\Plugins`.
+2. Restart SignalRGB. The keyboard appears as **Womier SK65** and follows your effects.
+
+The plugin uses the keyboard's live lighting mode and writes nothing to its memory, so it doesn't change the lighting saved by SK65 Studio. When SignalRGB closes, the keys show its Shutdown Color, black by default. Bringing the saved lighting back afterwards hasn't been tested yet.
+
+- **Don't change lighting in SK65 Studio while SignalRGB runs**, or the two fight over the keys. Keymaps, macros and the knob are fine.
+- **Keys frozen on one frame?** In SignalRGB, set the device's **Stream Start Command** to Every Frame. The default, Once, works on the tested board.
+- **Keys dark?** Press Fn+Space, as above.
 
 ## Privacy and permissions
 
@@ -80,6 +94,12 @@ Run the tests, which never touch a real keyboard:
 .venv\Scripts\python test_knob.py
 .venv\Scripts\python test_macros.py
 .venv\Scripts\python test_custom.py
+```
+
+The SignalRGB plugin has its own test, which needs Node.js 22.12 or later:
+
+```bash
+node signalrgb/test_plugin.mjs
 ```
 
 Build the exe, then compile [`installer.iss`](installer.iss) with Inno Setup:

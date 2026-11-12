@@ -7,8 +7,9 @@ come from the HID descriptors of a live board.
 Tested on a real SK65 V1 (2026-11-06): the `07 03` keymap write, moving `PgDn` to
 `End` through the app's Save Into Keyboard Memory, a Fn layer key, `Fn+J` to `Home`,
 and a Fn2 layer key reached through a key set to Fn2, the same way. The `07 02` lighting
-write is confirmed too: effects, speed and colour slots. So are `07 05` macros and `07 07`
-per-key colour. Every other write below is decoded but not yet confirmed on hardware.
+write is confirmed too: effects, speed and colour slots. So are `07 05` macros, `07 07`
+per-key colour and the `06` live LED stream. Every other write below is decoded but not yet
+confirmed on hardware.
 
 ## Interfaces (USB 0603:0351, product string "lucky65")
 
@@ -19,6 +20,8 @@ per-key colour. Every other write below is decoded but not yet confirmed on hard
 | `FF55` | 6 | Output, Input | 63 | Live LED stream |
 | `FF01` | 4 | Output, Input | 8 | Key index events (`04 F8 index state`) |
 | `000C` | 3 | Input | 2 | Consumer usage, 16-bit little endian |
+
+All five are collections of USB interface 1. `FF55` has usage `0202`; the others have usage `0001`.
 
 Reading these feature reports returns no data, so a written keymap cannot be read back.
 
@@ -195,8 +198,14 @@ slots above, so an exact colour needs this report.
 
 ### Live LED stream (report 6, page FF55)
 
-After `08 06`: 5 packets `06 nn` + 62 data bytes, with `nn` 1 to 5. Data is 3 bytes per
-matrix position, 10 ms apart.
+After `08 06`: 5 packets `06 nn` + 62 data bytes, with `nn` 1 to 5. The 310 data bytes are
+R, G, B for each matrix position from position 0 (`3 * position`), as in `07 07`. The vendor app
+sends the packets 10 ms apart.
+
+Confirmed on the board on 2026-11-12 through the SignalRGB plugin in `signalrgb/`: one `08 06`
+when streaming starts is enough, and the keys then follow every frame, sent at SignalRGB's
+frame rate with 1 ms between packets. Space lights through `mspace`, as with `07 07`. What
+ends the stream mode, and whether the saved lighting returns afterwards, is not yet known.
 
 ## Recovery
 
