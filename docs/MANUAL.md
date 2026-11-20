@@ -279,7 +279,16 @@ Click the gear icon at the top.
 ![Settings](images/settings.png)
 
 - **Minimize To System Tray:** when on, the minimize button hides the app in the tray. Click the tray icon to bring it back, or right-click it and choose **Exit**.
+- **Start With Windows:** opens the app when you sign in. With the tray option on, it starts hidden in the tray, otherwise minimized. This only works in the installed app.
+- **Volume Bar On Number Row:** when the volume changes, Esc to Backspace show it for 1.5 seconds. 100% lights all 14 keys, 1% lights one, and 0% or muted leaves the row dark. Pick its colour under **Volume Bar Colour**.
 - **Version:** the version you're running.
+
+About the volume bar:
+
+- It shows any volume change: the knob, volume keys or the Windows slider.
+- While it shows, the other rows go dark, unless you use **Custom**, **Fade Out** or **Ripple** lighting, which keep showing. Your lighting comes back after the bar.
+- The app has to be open or in the tray.
+- If SignalRGB also controls the keyboard, turn the SK65 off in SignalRGB, or the two will fight.
 
 The X button always closes the app fully, so use minimize if the knob needs to keep working.
 

@@ -33,6 +33,7 @@ import re
 import sys
 import threading
 import time
+import winreg
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog
@@ -43,8 +44,14 @@ import pystray
 import tkinter as tk
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageTk
 
+try:  # reads Windows' volume for the volume bar; imported here so PyInstaller bundles it
+    import comtypes
+    from pycaw.pycaw import AudioUtilities
+except ImportError:
+    comtypes = AudioUtilities = None
+
 APP_NAME = "Womier SK65 Studio"
-APP_VERSION = "1.7.0"  # the release workflow refuses a tag that differs
+APP_VERSION = "1.8.0"  # the release workflow refuses a tag that differs
 
 # Patched by the build script with the detected config interface.
 DEFAULT_VID = "0x0603"
@@ -254,6 +261,13 @@ STREAM_PACKETS, STREAM_DATA = 5, 62
 LIVE_FRAME_SECONDS = 1 / 40
 LIVE_KEEPALIVE_SECONDS = 0.5  # resend an unchanged frame this often
 RIPPLE_WIDTH, RIPPLE_REACH = 1.6, 12.0  # in key units
+# The volume bar: the number row, Esc to Backspace, drawn on the live stream.
+VOLUME_ROW = [k["id"] for k in KEYS if k["y"] == 0 and k["id"] != "knob"]
+VOLUME_BAR_SECONDS = 1.5  # how long the bar stays after the volume last changed
+VOLUME_POLL_SECONDS = 0.1
+VOLUME_DEFAULT_COLOR = "#00FF50"
+STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+STARTUP_ARG = "--startup"
 # The firmware's colour slots, in order. Slot 7 is multicolour.
 SWATCHES = ["#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FFFFFF"]
 MULTICOLOR = "multi"
@@ -317,6 +331,8 @@ def default_profile() -> dict:
         "usage_page": DEFAULT_USAGE_PAGE,
         "remap_on": False,
         "tray": False,
+        "volume_bar": False,
+        "volume_color": VOLUME_DEFAULT_COLOR,
         "remaps": empty_layers(),  # one dict per layer, source key to keycode
         "flashed": empty_layers(),  # keymap last saved into the keyboard; it cannot be read back
         "macros": empty_macros(),
@@ -377,6 +393,9 @@ def read_profile(path: Path) -> dict:
     profile["custom"] = clean_custom(profile["custom"])
     profile["knob"] = {**KNOB_DEFAULTS, **{k: v for k, v in profile["knob"].items()
                                            if k in KNOB_DEFAULTS and v in KC and v != "fn2" and v not in MACRO_IDS}}
+    if not valid_color(profile["volume_color"]):
+        profile["volume_color"] = VOLUME_DEFAULT_COLOR
+    profile["volume_bar"] = bool(profile["volume_bar"])
     if profile["lighting"]["color"] not in SWATCHES:
         profile["lighting"]["color"] = MULTICOLOR
     return profile
@@ -601,6 +620,107 @@ class LiveEffect:
                 for i in range(3):
                     sums[key][i] += color[i] * (1 - age / life)
         return {key: tuple(min(255, round(v * level * 255)) for v in value) for key, value in sums.items()}
+
+
+def volume_keys(level: float, muted: bool) -> int:
+    """How many number-row keys light up: one at 1%, all 14 at 100%, none at 0% or muted."""
+    if muted or level < 0.005:
+        return 0
+    return max(1, min(len(VOLUME_ROW), math.ceil(level * len(VOLUME_ROW) - 1e-6)))
+
+
+class VolumeBar:
+    """Drawn over every stream frame for a moment after the volume changes."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.count = 0
+        self.color = (0, 0, 0)
+        self.until = 0.0
+
+    def show(self, level: float, muted: bool, color: tuple) -> None:
+        with self.lock:
+            self.count = volume_keys(level, muted)
+            self.color = color
+            self.until = time.monotonic() + VOLUME_BAR_SECONDS
+
+    def active(self, now: float) -> bool:
+        return now < self.until
+
+    def apply(self, frame: dict, now: float) -> dict:
+        with self.lock:
+            if not self.active(now):
+                return frame
+            frame = dict(frame)
+            for i, key in enumerate(VOLUME_ROW):
+                frame[key] = self.color if i < self.count else (0, 0, 0)
+            return frame
+
+
+class StreamFrames:
+    """A stream's frames: a base drawing, with the volume bar on top."""
+
+    def __init__(self, base, bar: VolumeBar):
+        self.base = base
+        self.bar = bar
+
+    def frame(self, now: float) -> dict:
+        return self.bar.apply(self.base(now), now)
+
+
+class VolumeWatcher(threading.Thread):
+    """Polls Windows' master volume, so changes from anywhere show: the knob,
+    volume keys or the Windows slider. The first reading only sets a baseline."""
+
+    def __init__(self, post):
+        super().__init__(daemon=True)
+        self.post = post
+        self.stopping = False
+
+    def run(self):
+        if AudioUtilities is None:
+            self.post(("status", "The volume bar needs the pycaw library, which isn't installed."))
+            return
+        comtypes.CoInitialize()
+        try:
+            last, endpoint, fetched = None, None, 0.0
+            while not self.stopping:
+                try:
+                    if endpoint is None or time.monotonic() - fetched > 5:  # follows a new default device
+                        endpoint, fetched = AudioUtilities.GetSpeakers().EndpointVolume, time.monotonic()
+                    value = (round(endpoint.GetMasterVolumeLevelScalar(), 3), bool(endpoint.GetMute()))
+                    if last is not None and value != last:
+                        self.post(("volume",) + value)
+                    last = value
+                except Exception:  # no audio device, or it went away: try again shortly
+                    endpoint = None
+                    time.sleep(1)
+                time.sleep(VOLUME_POLL_SECONDS)
+        finally:
+            comtypes.CoUninitialize()
+
+
+def startup_command() -> str:
+    return f'"{sys.executable}" {STARTUP_ARG}'
+
+
+def startup_enabled() -> bool:
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY) as key:
+            return winreg.QueryValueEx(key, APP_NAME)[0] == startup_command()
+    except OSError:
+        return False
+
+
+def set_startup(enabled: bool) -> None:
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY) as key:
+        if enabled:
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, startup_command())
+        else:
+            try:
+                winreg.DeleteValue(key, APP_NAME)
+            except FileNotFoundError:
+                pass
 
 
 def open_stream(devices: list[dict]):
@@ -1426,6 +1546,9 @@ class App(ctk.CTk):
         self.light_status = ("Changes apply instantly", MEDIUM_GREY)
         self.live_effect = LiveEffect()
         self.live_stream = None
+        self.bar = VolumeBar()
+        self.bar_stream = None  # streams the bar alone, when no live effect is running
+        self.volume_watcher = None
         self.engine.on_press = self.live_effect.press_vk
 
         self.devices = []
@@ -1466,7 +1589,87 @@ class App(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Unmap>", self._on_unmap)
         self.apply_tray()
+        self.apply_volume_bar()
         threading.Thread(target=self._wait_for_second_launch, daemon=True).start()
+        if STARTUP_ARG in sys.argv:
+            self.after(300, self.start_hidden)
+
+    def start_hidden(self):
+        """Started with Windows: go straight to the tray, or the taskbar without one."""
+        if self.tray.icon:
+            self.withdraw()
+            self.hidden = True
+        else:
+            self.iconify()
+
+    def can_start_with_windows(self):
+        return bool(getattr(sys, "frozen", False))
+
+    def toggle_startup(self):
+        if not self.can_start_with_windows():
+            self.say("Start With Windows only works in the installed app.")
+            return
+        enable = not startup_enabled()
+        try:
+            set_startup(enable)
+        except OSError as e:
+            self.say(f"Could not change startup: {e}")
+            return
+        self.content.invalidate()
+        self.say("The app now starts with Windows" + (", hidden in the tray." if self.profile["tray"] else ", minimized.")
+                 if enable else "The app no longer starts with Windows.")
+
+    def apply_volume_bar(self):
+        if self.profile["volume_bar"] and not self.volume_watcher:
+            self.volume_watcher = VolumeWatcher(self.events.put_nowait)
+            self.volume_watcher.start()
+        elif not self.profile["volume_bar"] and self.volume_watcher:
+            self.volume_watcher.stopping = True
+            self.volume_watcher = None
+
+    def toggle_volume_bar(self):
+        self.profile["volume_bar"] = not self.profile["volume_bar"]
+        self.save_quiet()
+        self.apply_volume_bar()
+        self.content.invalidate()
+        self.say("Changing the volume now shows a bar on the number row." if self.profile["volume_bar"]
+                 else "The volume bar is off.")
+
+    def set_volume_color(self, color):
+        self.profile["volume_color"] = color
+        self.save_quiet()
+        self.content.invalidate()
+
+    def on_volume(self, level, muted):
+        if not self.profile["volume_bar"] or not self.connected:
+            return
+        self.bar.show(level, muted, rgb(self.profile["volume_color"]))
+        if self.live_stream or self.bar_stream:
+            return  # already streaming: the bar is drawn on the next frame
+        light = self.profile["lighting"]
+        base = {}
+        if light["effect"] == "custom":
+            level_scale = light["brightness"] / 100
+            base = {key: tuple(round(c * level_scale) for c in rgb(color)) for key, color in self.custom_colors().items()}
+        self.bar_stream = LiveStream(StreamFrames(lambda _now: dict(base), self.bar), list(self.devices),
+                                     self.events.put_nowait)
+        self.bar_stream.start()
+        self.after(200, self._bar_tick)
+
+    def _bar_tick(self):
+        if not self.bar_stream:
+            return
+        if self.bar.active(time.monotonic()):
+            self.after(200, self._bar_tick)
+            return
+        self.stop_bar()
+        self.apply_light(force=True)  # the keyboard shows its own lighting again
+
+    def stop_bar(self):
+        if self.bar_stream:
+            self.bar_stream.stopping = True
+            self.bar_stream.join(0.5)
+            self.bar_stream = None
 
     def _wait_for_second_launch(self):
         event = kernel32.CreateEventW(None, False, False, INSTANCE_NAME + "Show")
@@ -1694,6 +1897,28 @@ class App(ctk.CTk):
         self._toggle(img, x1 - round(46 * S), cy - round(23 * S) // 2, self.profile["tray"])
         surf.hit((x0, cy - round(25 * S), x1, cy + round(25 * S)), lambda _x, _y: self.toggle_tray(), key="tray",
                  tip="Minimizing hides the app in the system tray instead of the taskbar. Click the tray icon to open it.")
+        x0, x1, cy = self.control_row(surf, img, w, "Start With Windows")
+        on = self.can_start_with_windows() and startup_enabled()
+        self._toggle(img, x1 - round(46 * S), cy - round(23 * S) // 2, on)
+        surf.hit((x0, cy - round(25 * S), x1, cy + round(25 * S)), lambda _x, _y: self.toggle_startup(), key="startup",
+                 tip="Open the app when you sign in to Windows. With the tray option on, it starts hidden there."
+                 if self.can_start_with_windows() else "Only available in the installed app.")
+        x0, x1, cy = self.control_row(surf, img, w, "Volume Bar On Number Row")
+        self._toggle(img, x1 - round(46 * S), cy - round(23 * S) // 2, self.profile["volume_bar"])
+        surf.hit((x0, cy - round(25 * S), x1, cy + round(25 * S)), lambda _x, _y: self.toggle_volume_bar(),
+                 key="volume bar", tip="When the volume changes, the number row shows it for a moment: "
+                 "all 14 keys at 100%, one at 1%, none when muted.")
+        if self.profile["volume_bar"]:
+            _x0, x1, cy = self.control_row(surf, img, w, "Volume Bar Colour")
+            r = round(12 * S)
+            x = x1
+            for c in SWATCHES[::-1] + [VOLUME_DEFAULT_COLOR]:
+                box = (x - r * 2, cy - r, x, cy + r)
+                if self.profile["volume_color"] == c:
+                    rrect(img, (box[0] - 3, box[1] - 3, box[2] + 3, box[3] + 3), r + 3, LIGHT_GREY)
+                rrect(img, box, r, c)
+                surf.hit(box, lambda _x, _y, col=c: self.set_volume_color(col), key=f"volume {c}", tip=c)
+                x -= r * 2 + round(10 * S)
         self.control_row(surf, img, w, "Version", APP_VERSION)
 
     def control_row(self, surf, img, w, label, detail=None, color=None, mark=None):
@@ -2186,7 +2411,9 @@ class App(ctk.CTk):
 
     def start_live(self):
         self.stop_live()
-        self.live_stream = LiveStream(self.live_effect, list(self.devices), self.events.put_nowait)
+        self.stop_bar()
+        self.live_stream = LiveStream(StreamFrames(self.live_effect.frame, self.bar), list(self.devices),
+                                      self.events.put_nowait)
         self.live_stream.start()
         self.engine.live = True
         self.engine.sync()
@@ -2584,7 +2811,10 @@ class App(ctk.CTk):
             self._on_knob(ev[1])
         elif kind == "written":
             self.on_written(ev[1], ev[2])
+        elif kind == "volume":
+            self.on_volume(ev[1], ev[2])
         elif kind == "live_error":
+            self.stop_bar()
             self.stop_live()
             self.light_status = ("Failed", ERROR)
             self.say(f"Live lighting stopped: {ev[1]}. Press Send Again to retry.")
@@ -2676,8 +2906,11 @@ class App(ctk.CTk):
         self.monitor.stopping = True
         self.monitor.wake.set()
         self._stop_reader()
-        if self.live_stream:
+        if self.volume_watcher:
+            self.volume_watcher.stopping = True
+        if self.live_stream or self.bar_stream:
             # Hand the keyboard back its own lighting, so keys still react with the app closed.
+            self.stop_bar()
             self.stop_live()
             try:
                 for packet in build_lighting_packets(self.profile["lighting"], self.profile["custom"]):

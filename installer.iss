@@ -6,7 +6,7 @@
 
 #define AppName "Womier SK65 Studio"
 #ifndef AppVersion
-  #define AppVersion "1.7.0"
+  #define AppVersion "1.8.0"
 #endif
 #define AppExe "Womier_SK65_Studio.exe"
 
@@ -41,6 +41,10 @@ Source: "dist\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+
+[Registry]
+; The app's Start With Windows setting writes this value. Uninstalling removes it.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "{#AppName}"; Flags: uninsdeletevalue dontcreatekey
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
