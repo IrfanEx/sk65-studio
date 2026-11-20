@@ -35,6 +35,7 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 - **Macros:** record up to 10 macros of up to 80 steps, set how they repeat, put them on any key on any layer, and save them into the keyboard.
 - **Knob:** assign rotate left, rotate right and press, including mouse wheel actions.
 - **Lighting:** effect, colour, brightness and speed apply as soon as you change them.
+- **Live key effects:** **Fade Out** lights every key you press and fades it, and **Ripple** sends a ring out from it, at the speed you set. The app draws them, so they run while it's open, also from the tray.
 - **Custom lighting:** paint any colour onto each key, row or the whole board, with 5 presets. Your design is saved in the keyboard.
 - **SignalRGB:** a plugin lets [SignalRGB](https://signalrgb.com) light each key, in sync with the rest of your setup. See [SignalRGB](#signalrgb).
 - **Key tester:** check every key and the knob.
@@ -73,7 +74,7 @@ The plugin uses the keyboard's live lighting mode and writes nothing to its memo
 
 Installing asks for administrator rights once, to write to Program Files. The app itself runs as a normal user.
 
-It uses a Windows keyboard hook only while REMAP is on or the Key Tester or Connection page is open. Key presses are used on your computer and never stored or sent anywhere. The app makes no network connections. Everything it does is in [`sk65_studio.py`](sk65_studio.py).
+It uses a Windows keyboard hook only while REMAP is on, a live effect (Fade Out or Ripple) is selected, or the Key Tester or Connection page is open. Key presses are used on your computer and never stored or sent anywhere. The app makes no network connections. Everything it does is in [`sk65_studio.py`](sk65_studio.py).
 
 ## Build from source
 
@@ -90,6 +91,7 @@ Run the tests, which never touch a real keyboard:
 ```bash
 .venv\Scripts\python test_layers.py
 .venv\Scripts\python test_lighting.py
+.venv\Scripts\python test_live.py
 .venv\Scripts\python test_tray.py
 .venv\Scripts\python test_knob.py
 .venv\Scripts\python test_macros.py

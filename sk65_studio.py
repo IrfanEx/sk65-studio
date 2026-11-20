@@ -10,6 +10,8 @@ What works today:
   * Software remapping of base layer keys and the knob with a native low-level
     keyboard hook. It is active while the app runs and needs no firmware
     support. Windows never sees the Fn key, so software cannot do Fn layers.
+  * Live key effects (Fade Out, Ripple): drawn here from the keyboard hook and
+    sent through the board's live LED stream while the app runs.
   * Live connection monitor and self-test.
   * Knob monitor: reads the keyboard's consumer-control interface directly, so
     a knob event is proven to come from this board.
@@ -42,7 +44,7 @@ import tkinter as tk
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageTk
 
 APP_NAME = "Womier SK65 Studio"
-APP_VERSION = "1.6.0"  # the release workflow refuses a tag that differs
+APP_VERSION = "1.7.0"  # the release workflow refuses a tag that differs
 
 # Patched by the build script with the detected config interface.
 DEFAULT_VID = "0x0603"
@@ -240,8 +242,18 @@ KNOB_MATCH_SECONDS = 0.03  # longest wait for the board's report matching a medi
 SELF_INPUT_TAG = 0x534B3635  # marks key presses this app sends
 KNOB_LABELS = {"ccw": "Rotate Counterclockwise", "cw": "Rotate Clockwise", "press": "Press Encoder"}
 KNOB_DEFAULTS = {"ccw": "volume down", "cw": "volume up", "press": "volume mute"}
-EFFECTS = ["Static", "Breathing", "Wave", "Spectrum", "Reactive", "Off", "Custom"]
+EFFECTS = ["Static", "Breathing", "Wave", "Spectrum", "Reactive", "Fade Out", "Ripple", "Off", "Custom"]
 EFFECT_IDS = {"static": 1, "breathing": 2, "wave": 0, "spectrum": 4, "reactive": 6, "off": 1, "custom": 19}
+# Drawn by this app and sent to the keyboard's live LED stream, so they only run
+# while the app is open. The keyboard's memory keeps LIVE_FALLBACK for when it isn't.
+LIVE_EFFECTS = ("fade out", "ripple")
+LIVE_FALLBACK = "reactive"
+STREAM_PAGE, STREAM_USAGE = 0xFF55, 0x0202  # output report 6, see PROTOCOL.md
+STREAM_START = bytes((8, 6, 0, 0, 0, 0, 0, 0))  # report 8 on the aux page
+STREAM_PACKETS, STREAM_DATA = 5, 62
+LIVE_FRAME_SECONDS = 1 / 40
+LIVE_KEEPALIVE_SECONDS = 0.5  # resend an unchanged frame this often
+RIPPLE_WIDTH, RIPPLE_REACH = 1.6, 12.0  # in key units
 # The firmware's colour slots, in order. Slot 7 is multicolour.
 SWATCHES = ["#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", "#FFFFFF"]
 MULTICOLOR = "multi"
@@ -503,10 +515,135 @@ def build_custom_packet(colors: dict) -> bytes:
     return bytes(packet)
 
 
+def firmware_light(light: dict) -> dict:
+    """The lighting the keyboard's memory can hold. A live effect isn't one, so
+    the keyboard keeps LIVE_FALLBACK for when the app isn't running."""
+    if light["effect"] in LIVE_EFFECTS:
+        return {**light, "effect": LIVE_FALLBACK}
+    return light
+
+
 def build_lighting_packets(light: dict, custom: dict) -> tuple:
+    light = firmware_light(light)
     if light["effect"] == "custom":
         return build_lighting_packet(light), build_custom_packet(custom["presets"][custom["preset"]])
     return (build_lighting_packet(light),)
+
+
+def build_stream_packets(colors: dict) -> list[bytes]:
+    """Report 6 on page FF55: 5 packets "06 nn" + 62 bytes, R, G, B at 3 * matrix position."""
+    data = bytearray(STREAM_PACKETS * STREAM_DATA)
+    for key, color in colors.items():
+        offset = 3 * MATRIX.index(KEY_TO_MATRIX.get(key, key))  # only "fn" isn't in the map
+        data[offset:offset + 3] = bytes(color)
+    return [bytes((6, n + 1)) + bytes(data[n * STREAM_DATA:(n + 1) * STREAM_DATA]) for n in range(STREAM_PACKETS)]
+
+
+class LiveEffect:
+    """Fade Out and Ripple. Each key press is kept with its time and colour, and
+    frame() works out every key's colour at a moment, in key units."""
+
+    CENTERS = {k["id"]: (k["x"] + k["w"] / 2, k["y"] + 0.5) for k in KEYS if k["id"] != "knob"}
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.light = dict(default_profile()["lighting"])
+        self.presses = []  # (key id, time, (r, g, b))
+
+    def configure(self, light: dict) -> None:
+        with self.lock:
+            if light["effect"] != self.light["effect"]:
+                self.presses = []
+            self.light = dict(light)
+
+    def press_vk(self, vk: int) -> None:
+        """Called from the keyboard hook, so it has to be quick."""
+        k = KC_BY_VK.get(vk)
+        if k and k[0] in self.CENTERS:
+            self.press(k[0], time.monotonic())
+
+    def press(self, key: str, now: float) -> None:
+        with self.lock:
+            color = self.light["color"]
+            if color == MULTICOLOR:
+                value = colorsys.hsv_to_rgb(now * 0.15 % 1.0, 1.0, 1.0)  # the rainbow moves on over time
+            else:
+                value = tuple(c / 255 for c in rgb(color))
+            self.presses.append((key, now, value))
+
+    def fade_seconds(self) -> float:
+        return 3 * 0.03 ** (self.light["speed"] / 100)  # 3 s at 0, about 0.1 s at 100
+
+    def ripple_speed(self) -> float:
+        return 3 + self.light["speed"] * 0.37  # key units per second
+
+    def frame(self, now: float) -> dict:
+        with self.lock:
+            light = self.light
+            ripple = light["effect"] == "ripple"
+            life = RIPPLE_REACH / self.ripple_speed() if ripple else self.fade_seconds()
+            self.presses = [p for p in self.presses if now - p[1] < life]
+            presses = list(self.presses)
+        level = light["brightness"] / 100
+        sums = {key: [0.0, 0.0, 0.0] for key in self.CENTERS}
+        for key, start, color in presses:
+            age = now - start
+            if ripple:
+                radius = age * self.ripple_speed()
+                ox, oy = self.CENTERS[key]
+                fade = 1 - radius / RIPPLE_REACH
+                for target, (x, y) in self.CENTERS.items():
+                    ring = 1 - abs(math.hypot(x - ox, y - oy) - radius) / (RIPPLE_WIDTH / 2)
+                    if ring > 0:
+                        for i in range(3):
+                            sums[target][i] += color[i] * ring * fade
+            else:
+                for i in range(3):
+                    sums[key][i] += color[i] * (1 - age / life)
+        return {key: tuple(min(255, round(v * level * 255)) for v in value) for key, value in sums.items()}
+
+
+def open_stream(devices: list[dict]):
+    target = next((d for d in devices if d["usage_page"] == STREAM_PAGE and d.get("usage") == STREAM_USAGE), None)
+    if not target:
+        raise OSError(f"Interface {STREAM_PAGE:04X} not found")
+    dev = hid.device()
+    dev.open_path(target["path"])
+    return dev
+
+
+class LiveStream(threading.Thread):
+    """Sends LiveEffect frames to the keyboard while a live effect is selected."""
+
+    def __init__(self, effect: LiveEffect, devices: list[dict], post):
+        super().__init__(daemon=True)
+        self.effect = effect
+        self.devices = devices
+        self.post = post
+        self.stopping = False
+
+    def run(self):
+        dev = None
+        try:
+            write_report(self.devices, PROTOCOL["aux_page"], STREAM_START)
+            dev = open_stream(self.devices)
+            last, sent = None, 0.0
+            while not self.stopping:
+                now = time.monotonic()
+                packets = build_stream_packets(self.effect.frame(now))
+                if packets != last or now - sent >= LIVE_KEEPALIVE_SECONDS:
+                    for packet in packets:
+                        if dev.write(packet) < 0:
+                            raise OSError(dev.error() or "Keyboard refused the frame")
+                        time.sleep(0.001)
+                    last, sent = packets, now
+                time.sleep(max(0.0, LIVE_FRAME_SECONDS - (time.monotonic() - now)))
+        except (OSError, ValueError) as e:
+            if not self.stopping:
+                self.post(("live_error", str(e) or "Live lighting stopped"))
+        finally:
+            if dev:
+                dev.close()
 
 
 def write_report(devices: list[dict], page: int, packet: bytes) -> None:
@@ -627,6 +764,9 @@ class Engine:
         self.knob_time = 0.0
         self.knob_signal = threading.Event()
         self.held = set()
+        self.live = False  # a live lighting effect wants every key press
+        self.on_press = None  # called with the virtual key, on the hook thread
+        self.live_held = set()
         self._proc = HOOKPROC(self._on_event)
         self._thread = None
         self._tid = None
@@ -669,7 +809,7 @@ class Engine:
         self.map = mapping
 
     def sync(self) -> None:
-        want = self.remap_on or self.capture or self.record_window
+        want = self.remap_on or self.capture or self.record_window or self.live
         if want and not self._thread:
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
@@ -704,6 +844,13 @@ class Engine:
                 # Keys this app sends must not be remapped again: the knob's
                 # own events are injected too, so a swap would loop forever.
                 if event.dwExtraInfo != SELF_INPUT_TAG:
+                    # Physical presses only, once per press: held keys repeat their key-down.
+                    if self.live and self.on_press and not injected:
+                        if not down:
+                            self.live_held.discard(vk)
+                        elif vk not in self.live_held:
+                            self.live_held.add(vk)
+                            self.on_press(vk)
                     # Swallowed so a recorded Win or Alt+Tab doesn't also act on the desktop.
                     if self.record_window and not injected and user32.GetForegroundWindow() == self.record_window:
                         self.post(("record", vk, down, event.time))
@@ -1277,6 +1424,9 @@ class App(ctk.CTk):
         self.light_writing = None
         self.light_sent = None
         self.light_status = ("Changes apply instantly", MEDIUM_GREY)
+        self.live_effect = LiveEffect()
+        self.live_stream = None
+        self.engine.on_press = self.live_effect.press_vk
 
         self.devices = []
         self.connected = False
@@ -1800,19 +1950,24 @@ class App(ctk.CTk):
         S = self.S
         light = self.profile["lighting"]
         draw = ImageDraw.Draw(img)
-        x0, x1, cy = self.control_row(surf, img, w, "Effect")
         f = font(16 * S)
-        x = x1
-        for name in reversed(EFFECTS):
-            bw = round(f.getlength(name)) + round(18 * S)
-            box = (x - bw, cy - round(15 * S), x, cy + round(15 * S))
-            selected = light["effect"] == name.lower()
-            if selected:
-                rrect(img, box, round(5 * S), ACCENT)
-            color = INSIDE_ACCENT if selected else (LIGHT_GREY if surf.hover == name else MEDIUM_GREY)
-            draw.text(((box[0] + box[2]) / 2, cy), name, fill=rgb(color), font=f, anchor="mm")
-            surf.hit(box, lambda _x, _y, n=name: self.set_light(effect=n.lower()), key=name)
-            x -= bw + round(4 * S)
+        # Live effects get their own row: this app draws them, so they only run while it's open.
+        for label, names in (("Effect", [n for n in EFFECTS if n.lower() not in LIVE_EFFECTS]),
+                             ("Live Effect (while app runs)", [n for n in EFFECTS if n.lower() in LIVE_EFFECTS])):
+            _x0, x1, cy = self.control_row(surf, img, w, label)
+            x = x1
+            for name in reversed(names):
+                bw = round(f.getlength(name)) + round(18 * S)
+                box = (x - bw, cy - round(15 * S), x, cy + round(15 * S))
+                selected = light["effect"] == name.lower()
+                if selected:
+                    rrect(img, box, round(5 * S), ACCENT)
+                color = INSIDE_ACCENT if selected else (LIGHT_GREY if surf.hover == name else MEDIUM_GREY)
+                draw.text(((box[0] + box[2]) / 2, cy), name, fill=rgb(color), font=f, anchor="mm")
+                surf.hit(box, lambda _x, _y, n=name: self.set_light(effect=n.lower()), key=name,
+                         tip="Lights each key you press. Runs while this app is open, also from the tray."
+                         if name.lower() in LIVE_EFFECTS else "")
+                x -= bw + round(4 * S)
         if light["effect"] == "custom":
             self.paint_custom(surf, img, w)
         else:
@@ -2004,7 +2159,19 @@ class App(ctk.CTk):
         """Sends the lighting like VIA does, as soon as it changes. Each write
         lands in the keyboard's flash, so repeats of the last packets are skipped."""
         self.light_job = None
-        packets = build_lighting_packets(self.profile["lighting"], self.profile["custom"])
+        light = self.profile["lighting"]
+        if light["effect"] in LIVE_EFFECTS:
+            self.live_effect.configure(light)
+            if not self.connected:
+                self.light_status = ("Keyboard not connected", ERROR)
+            elif force or not self.live_stream:
+                self.start_live()
+            self.content.invalidate()
+            return
+        if self.live_stream:
+            self.stop_live()
+            force = True  # the keyboard still shows the stream, whatever was sent before
+        packets = build_lighting_packets(light, self.profile["custom"])
         if packets == self.light_sent and not force:
             return
         if not self.connected:
@@ -2016,6 +2183,27 @@ class App(ctk.CTk):
             self.light_writing = packets
             self.light_status = ("Sending", MEDIUM_GREY)
             self.start_write("lighting", *packets)
+
+    def start_live(self):
+        self.stop_live()
+        self.live_stream = LiveStream(self.live_effect, list(self.devices), self.events.put_nowait)
+        self.live_stream.start()
+        self.engine.live = True
+        self.engine.sync()
+        self.light_status = ("Live while this app runs", ACCENT)
+        name = next(n for n in EFFECTS if n.lower() == self.profile["lighting"]["effect"])
+        self.say(f"{name} is running. It works while this app is open, also from the tray. "
+                 "If SignalRGB controls the SK65 too, turn the keyboard off there.")
+
+    def stop_live(self):
+        if self.live_stream:
+            self.live_stream.stopping = True
+            self.live_stream.join(0.5)
+            self.live_stream = None
+        self.engine.live = False
+        self.engine.live_held.clear()
+        self.engine.sync()
+        self.light_sent = None  # the keyboard has to be told its own lighting again
 
     def paint_saveload(self, surf, img, w, h):
         self.control_row(surf, img, w, "Keyboard Memory", self.memory_status())
@@ -2396,6 +2584,11 @@ class App(ctk.CTk):
             self._on_knob(ev[1])
         elif kind == "written":
             self.on_written(ev[1], ev[2])
+        elif kind == "live_error":
+            self.stop_live()
+            self.light_status = ("Failed", ERROR)
+            self.say(f"Live lighting stopped: {ev[1]}. Press Send Again to retry.")
+            self.content.invalidate()
         elif kind == "show":
             self.show_window()
         elif kind == "exit":
@@ -2416,8 +2609,11 @@ class App(ctk.CTk):
                 self.say("Keyboard connected.")
                 self.run_checks()
                 self._start_reader()
+                if self.profile["lighting"]["effect"] in LIVE_EFFECTS:
+                    self.apply_light(force=True)
             else:
                 self.say("Keyboard disconnected.")
+                self.stop_live()
                 self.light_sent = None
                 self._stop_reader()
                 self.checks = {"config": None, "firmware": None}
@@ -2480,7 +2676,15 @@ class App(ctk.CTk):
         self.monitor.stopping = True
         self.monitor.wake.set()
         self._stop_reader()
-        self.engine.remap_on = self.engine.capture = False
+        if self.live_stream:
+            # Hand the keyboard back its own lighting, so keys still react with the app closed.
+            self.stop_live()
+            try:
+                for packet in build_lighting_packets(self.profile["lighting"], self.profile["custom"]):
+                    write_report(self.devices, PROTOCOL["config_page"], packet)
+            except (OSError, ValueError):
+                pass
+        self.engine.remap_on = self.engine.capture = self.engine.live = False
         self.engine.stop()
         self.tray.stop()
         self.save_quiet()

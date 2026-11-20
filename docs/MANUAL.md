@@ -194,14 +194,23 @@ Changes reach the keyboard as soon as you make them.
 | Setting | What it does |
 |---|---|
 | **Effect** | The animation. **Off** turns the lights off, and **Custom** lets you paint your own |
-| **Brightness** | Has 5 levels, so small slider moves may not change anything |
-| **Speed** | Further right is faster |
+| **Live Effect** | **Fade Out** lights each key you press and fades it out. **Ripple** sends a ring of light out from it. See below |
+| **Brightness** | Has 5 levels, so small slider moves may not change anything. Live effects use every step |
+| **Speed** | Further right is faster. For live effects it sets how fast keys fade or rings spread |
 | **Color** | One colour, or the rainbow circle for multicolour |
 | **Send Again** | Sends the current lighting again |
 
 **Static** can't be multicolour, so it switches to red if multicolour was selected.
 
 If the keys stay dark, press **Fn+Space**. It switches RGB off inside the keyboard, and the app can't turn it back on.
+
+### Live effects
+
+**Fade Out** and **Ripple** are drawn by the app and sent to the keyboard many times a second, so they work only while the app is open. Minimizing to the tray keeps them going. Every key you press gets its own light, so fast typing lights several keys at once.
+
+- When you exit the app, the keyboard switches to its built-in **Reactive** effect with the same colour, so keys still light up when pressed.
+- If SignalRGB also controls the SK65, turn the keyboard off there, or the two fight over the keys.
+- Fn isn't seen by Windows, so it doesn't light up.
 
 ### Custom lighting
 

@@ -35,6 +35,7 @@ jobs:
           python test_knob.py
           python test_macros.py
           python test_custom.py
+          python test_live.py
 
       - name: Build exe
         run: pyinstaller --noconfirm --onefile --windowed --icon "assets\via.ico" --add-data "assets\via.ico;assets" --hidden-import pystray._win32 --name "Womier_SK65_Studio" sk65_studio.py

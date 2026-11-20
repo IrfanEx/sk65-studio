@@ -1,0 +1,109 @@
+<head>
+  <title>SK65 Ripple</title>
+  <meta description="Every key you press sends out a ring of light across the keyboard. Made for the Womier SK65."/>
+  <meta publisher="Irfan" />
+  <meta property="colorMode" label="Color Mode" tooltip="Single color, a rainbow that shifts over time, or a random color for every press." type="combobox" values="Single Color,Rainbow,Random" default="Rainbow">
+  <meta property="rippleColor" label="Ripple Color" tooltip="Color of the ripple in Single Color mode." type="color" min="0" max="360" default="#FF2D95">
+  <meta property="bgColor" label="Background Color" tooltip="Color of keys that are not lit." type="color" min="0" max="360" default="#000000">
+  <meta property="rippleSpeed" label="Ripple Speed" tooltip="How fast the ring spreads. Higher is faster." type="number" min="1" max="100" default="40">
+  <meta property="rippleWidth" label="Ripple Width" tooltip="Thickness of the ring." type="number" min="1" max="100" default="35">
+  <meta property="rippleSize" label="Ripple Size" tooltip="How far the ring travels before it disappears." type="number" min="1" max="100" default="50">
+  <meta property="kbX" label="Keyboard X" tooltip="Left edge of the SK65 on the canvas. Change it if the light lands on the wrong keys." type="number" min="0" max="320" default="24">
+  <meta property="kbY" label="Keyboard Y" tooltip="Top edge of the SK65 on the canvas." type="number" min="0" max="200" default="58">
+  <meta property="kbScale" label="Keyboard Size" tooltip="Size of one key on the canvas (the device scale in Layouts)." type="number" min="1" max="20" default="8">
+</head>
+
+<body style="margin: 0; padding: 0; background: #000;">
+  <canvas id="exCanvas" width="320" height="200"></canvas>
+</body>
+
+<script>
+  const canvas = document.getElementById('exCanvas');
+  const ctx = canvas.getContext('2d');
+
+  // SK65 layout, same as the Womier_SK65.js plugin: ["name|alias|...", width in key units]. "" is a gap.
+  const LAYOUT = [
+    [["esc|escape", 1], ["1", 1], ["2", 1], ["3", 1], ["4", 1], ["5", 1], ["6", 1], ["7", 1], ["8", 1], ["9", 1], ["0", 1],
+     ["-|minus|_|oemminus|dash|hyphen", 1], ["=|equal|equals|plus|oemplus", 1], ["backspace|back|bksp", 2], ["", 1]],
+    [["tab", 1.5], ["q", 1], ["w", 1], ["e", 1], ["r", 1], ["t", 1], ["y", 1], ["u", 1], ["i", 1], ["o", 1], ["p", 1],
+     ["[|bracketleft|leftbracket|openbracket|oem4|braceleft", 1], ["]|bracketright|rightbracket|closebracket|oem6|braceright", 1],
+     ["\\|backslash|oem5|bar", 1.5], ["delete|del", 1]],
+    [["capslock|caps|capital", 1.75], ["a", 1], ["s", 1], ["d", 1], ["f", 1], ["g", 1], ["h", 1], ["j", 1], ["k", 1], ["l", 1],
+     [";|semicolon|oem1|colon", 1], ["'|quote|apostrophe|oem7|quotedbl", 1], ["enter|return", 2.25], ["pageup|pgup|prior", 1]],
+    [["shift|leftshift|lshift", 2.25], ["z", 1], ["x", 1], ["c", 1], ["v", 1], ["b", 1], ["n", 1], ["m", 1],
+     [",|comma|oemcomma|less", 1], [".|period|dot|oemperiod|greater", 1], ["/|slash|oem2|question", 1],
+     ["rightshift|rshift", 1.75], ["up|uparrow|arrowup", 1], ["pagedown|pgdn|next", 1]],
+    [["ctrl|control|leftctrl|lctrl|leftcontrol", 1.25], ["win|lwin|leftwin|meta|super|windows|leftwindows", 1.25],
+     ["alt|leftalt|lalt|menu", 1.25], ["space|spacebar", 6.25], ["fn|rightalt|ralt|altgr", 1.25],
+     ["rightctrl|rctrl|rightcontrol", 1.25], ["", 0.5], ["left|leftarrow|arrowleft", 1], ["down|downarrow|arrowdown", 1],
+     ["right|rightarrow|arrowright", 1]],
+  ];
+
+  // key name -> {x, y, w} in key units
+  const KEYS = {};
+  LAYOUT.forEach((row, y) => {
+    let x = 0;
+    for (const [names, w] of row) {
+      if (names) for (const n of names.split('|')) KEYS[n] = {x, y, w};
+      x += w;
+    }
+  });
+
+  function findKey(raw) {
+    let name = String(raw).trim();
+    if (name.includes(' + ')) name = name.split(' + ').pop().trim();   // "Ctrl + A" -> "A"
+    if (KEYS[name]) return KEYS[name];
+    name = name.toLowerCase().replace(/^key_?/, '').replace(/^digit/, '').replace(/[\s_]/g, '');
+    if (KEYS[name]) return KEYS[name];
+    console.log('SK65 Ripple: unknown key ' + JSON.stringify(raw));
+    return null;
+  }
+
+  let ripples = [];
+  let rainbowHue = 0;
+  let last = performance.now();
+
+  function pickHue() {
+    if (colorMode === 'Random') return Math.random() * 360;
+    if (colorMode === 'Rainbow') return rainbowHue;
+    return null;   // Single Color
+  }
+
+  // Called by SignalRGB on every key press. Every press starts its own ripple.
+  function onKeyPressed(keyName) {
+    const key = findKey(keyName);
+    if (key) ripples.push({cx: key.x + key.w / 2, cy: key.y + 0.5, r: 0, hue: pickHue()});
+  }
+
+  function update(now) {
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+    rainbowHue = (rainbowHue + dt * 60) % 360;
+
+    const speed = 3 + rippleSpeed * 0.37;     // key units per second: 3 to 40
+    const width = 0.4 + rippleWidth * 0.026;  // ring thickness in key units: 0.4 to 3
+    const maxR = 2 + rippleSize * 0.16;       // how far the ring travels in key units: 2 to 18
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, 320, 200);
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (const rp of ripples) {
+      rp.r += speed * dt;
+      if (rp.r >= maxR) continue;
+      ctx.globalAlpha = 1 - rp.r / maxR;
+      ctx.strokeStyle = rp.hue === null ? rippleColor : `hsl(${rp.hue}, 100%, 50%)`;
+      ctx.lineWidth = width * kbScale;
+      ctx.beginPath();
+      ctx.arc(kbX + rp.cx * kbScale, kbY + rp.cy * kbScale, Math.max(rp.r * kbScale, 0.1), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ripples = ripples.filter(rp => rp.r < maxR);
+
+    window.requestAnimationFrame(update);
+  }
+
+  window.requestAnimationFrame(update);
+</script>
