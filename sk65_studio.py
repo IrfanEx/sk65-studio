@@ -51,7 +51,7 @@ except ImportError:
     comtypes = AudioUtilities = None
 
 APP_NAME = "Womier SK65 Studio"
-APP_VERSION = "1.8.0"  # the release workflow refuses a tag that differs
+APP_VERSION = "1.9.0"  # the release workflow refuses a tag that differs
 
 # Patched by the build script with the detected config interface.
 DEFAULT_VID = "0x0603"
@@ -809,6 +809,146 @@ kernel32.SetEvent.argtypes = (wintypes.HANDLE,)
 kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
 kernel32.WaitForSingleObject.restype = wintypes.DWORD
 
+
+# ---------- USB polling rate ----------
+# hidapi cannot see endpoint descriptors, so the configuration descriptor is
+# asked from the keyboard's hub, read-only, the way Microsoft's USBView does.
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8)]
+
+
+class SP_DEVINFO_DATA(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("ClassGuid", GUID), ("DevInst", wintypes.DWORD),
+                ("Reserved", ctypes.c_void_p)]
+
+
+GUID_USB_DEVICE = GUID(0xA5DCBF10, 0x6530, 0x11D2, (ctypes.c_ubyte * 8)(0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED))
+GUID_USB_HUB = GUID(0xF18A0E88, 0xC30C, 0x11D0, (ctypes.c_ubyte * 8)(0x88, 0x15, 0x00, 0xA0, 0xC9, 0x06, 0xBE, 0xD8))
+DIGCF_PRESENT, DIGCF_DEVICEINTERFACE, SPDRP_ADDRESS = 0x2, 0x10, 0x1C
+IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION = 0x220448, 0x220410
+GENERIC_WRITE, FILE_SHARE_WRITE, OPEN_EXISTING = 0x40000000, 0x2, 3
+INVALID_HANDLE = ctypes.c_void_p(-1).value
+USB_SPEEDS = ("low", "full", "high", "super")
+
+setupapi = ctypes.WinDLL("setupapi", use_last_error=True)
+cfgmgr32 = ctypes.WinDLL("cfgmgr32")
+setupapi.SetupDiGetClassDevsW.argtypes = (ctypes.POINTER(GUID), wintypes.LPCWSTR, wintypes.HWND, wintypes.DWORD)
+setupapi.SetupDiGetClassDevsW.restype = ctypes.c_void_p
+setupapi.SetupDiEnumDeviceInfo.argtypes = (ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(SP_DEVINFO_DATA))
+setupapi.SetupDiGetDeviceInstanceIdW.argtypes = (ctypes.c_void_p, ctypes.POINTER(SP_DEVINFO_DATA), wintypes.LPWSTR,
+                                                 wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
+setupapi.SetupDiGetDeviceRegistryPropertyW.argtypes = (ctypes.c_void_p, ctypes.POINTER(SP_DEVINFO_DATA), wintypes.DWORD,
+                                                       ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p, wintypes.DWORD,
+                                                       ctypes.POINTER(wintypes.DWORD))
+setupapi.SetupDiDestroyDeviceInfoList.argtypes = (ctypes.c_void_p,)
+cfgmgr32.CM_Get_Parent.argtypes = (ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, wintypes.ULONG)
+cfgmgr32.CM_Get_Device_IDW.argtypes = (wintypes.DWORD, wintypes.LPWSTR, wintypes.ULONG, wintypes.ULONG)
+cfgmgr32.CM_Get_Device_Interface_List_SizeW.argtypes = (ctypes.POINTER(wintypes.ULONG), ctypes.POINTER(GUID),
+                                                        wintypes.LPCWSTR, wintypes.ULONG)
+cfgmgr32.CM_Get_Device_Interface_ListW.argtypes = (ctypes.POINTER(GUID), wintypes.LPCWSTR, wintypes.LPWSTR,
+                                                   wintypes.ULONG, wintypes.ULONG)
+kernel32.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                                 wintypes.DWORD, wintypes.HANDLE)
+kernel32.CreateFileW.restype = wintypes.HANDLE
+kernel32.DeviceIoControl.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+                                     wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p)
+kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+
+def find_usb_port(vid: int, pid: int) -> tuple[int, str]:
+    """The keyboard's port number on its hub, and the hub's device id."""
+    want = f"USB\\VID_{vid:04X}&PID_{pid:04X}\\"
+    info = setupapi.SetupDiGetClassDevsW(ctypes.byref(GUID_USB_DEVICE), None, None, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE)
+    if info in (None, INVALID_HANDLE):
+        raise OSError("Cannot list USB devices")
+    try:
+        index = 0
+        data = SP_DEVINFO_DATA(cbSize=ctypes.sizeof(SP_DEVINFO_DATA))
+        while setupapi.SetupDiEnumDeviceInfo(info, index, ctypes.byref(data)):
+            index += 1
+            device_id = ctypes.create_unicode_buffer(512)
+            setupapi.SetupDiGetDeviceInstanceIdW(info, ctypes.byref(data), device_id, 512, None)
+            if not device_id.value.upper().startswith(want):
+                continue
+            port, parent = wintypes.DWORD(), wintypes.DWORD()
+            hub_id = ctypes.create_unicode_buffer(512)
+            if (not setupapi.SetupDiGetDeviceRegistryPropertyW(info, ctypes.byref(data), SPDRP_ADDRESS, None,
+                                                               ctypes.byref(port), 4, None)
+                    or cfgmgr32.CM_Get_Parent(ctypes.byref(parent), data.DevInst, 0)
+                    or cfgmgr32.CM_Get_Device_IDW(parent, hub_id, 512, 0)):
+                raise OSError("Cannot find the keyboard's USB port")
+            return port.value, hub_id.value
+        raise OSError("Keyboard not on USB")
+    finally:
+        setupapi.SetupDiDestroyDeviceInfoList(info)
+
+
+def read_usb_config(vid: int, pid: int) -> tuple[int, bytes]:
+    """USB speed (0 low, 1 full, 2 high, 3 super) and configuration descriptor."""
+    port, hub_id = find_usb_port(vid, pid)
+    size = wintypes.ULONG()
+    path = None
+    if not cfgmgr32.CM_Get_Device_Interface_List_SizeW(ctypes.byref(size), ctypes.byref(GUID_USB_HUB), hub_id, 0):
+        paths = ctypes.create_unicode_buffer(max(size.value, 1))
+        if not cfgmgr32.CM_Get_Device_Interface_ListW(ctypes.byref(GUID_USB_HUB), hub_id, paths, size, 0):
+            path = paths.value
+    if not path:
+        raise OSError("Cannot open the keyboard's USB hub")
+    hub = kernel32.CreateFileW(path, GENERIC_WRITE, FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None)
+    if hub in (None, INVALID_HANDLE):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        got = wintypes.DWORD()
+        node = (ctypes.c_ubyte * 512)()
+        ctypes.c_ulong.from_buffer(node).value = port
+        if not kernel32.DeviceIoControl(hub, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, node, len(node), node,
+                                        len(node), ctypes.byref(got), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        speed = node[23]  # after ConnectionIndex, the 18 byte device descriptor and the configuration value
+        request = (ctypes.c_ubyte * (12 + 1024))()
+        ctypes.c_ulong.from_buffer(request).value = port
+        request[4:12] = (0x80, 6, 0, 2, 0, 0, 0x00, 0x04)  # GET_DESCRIPTOR, configuration 0, up to 1024 bytes
+        if not kernel32.DeviceIoControl(hub, IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION, request, len(request),
+                                        request, len(request), ctypes.byref(got), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return speed, bytes(request[12:got.value])
+    finally:
+        kernel32.CloseHandle(hub)
+
+
+def key_poll_interval(speed: int, config: bytes) -> float | None:
+    """Milliseconds between polls of the endpoint that carries key presses: the
+    keyboard interface's interrupt IN endpoint, else the fastest HID one. Windows
+    rounds a low or full speed bInterval down to a power of two, at most 32 ms."""
+    found, interface, i = [], None, 0
+    while i + 2 <= len(config) and config[i] >= 2:
+        d = config[i:i + config[i]]
+        if d[1] == 4 and len(d) >= 9:
+            interface = d
+        elif d[1] == 5 and len(d) >= 7 and interface is not None and interface[5] == 3:
+            if d[2] & 0x80 and d[3] & 3 == 3 and d[6]:
+                found.append((not (interface[6] == 1 and interface[7] == 1), d[6]))
+        i += d[0]
+    if not found:
+        return None
+    interval = min(found)[1]
+    if speed >= 2:
+        return 0.125 * 2 ** (min(interval, 16) - 1)
+    return float(2 ** (min(interval, 32).bit_length() - 1))
+
+
+def polling_rate(vid: int, pid: int) -> tuple[bool, str]:
+    try:
+        speed, config = read_usb_config(vid, pid)
+    except OSError as e:
+        return False, f"Could not read: {e}"
+    ms = key_poll_interval(speed, config)
+    if ms is None:
+        return False, "No key endpoint found"
+    name = USB_SPEEDS[speed] if speed < len(USB_SPEEDS) else "unknown"
+    return True, f"{round(1000 / ms)} Hz, every {ms:g} ms ({name} speed USB)"
+
 # installer.iss names the same mutex, so Setup can ask to close a running copy.
 INSTANCE_NAME = "WomierSK65Studio"
 ERROR_ALREADY_EXISTS, EVENT_MODIFY_STATE, INFINITE = 183, 0x0002, 0xFFFFFFFF
@@ -1066,7 +1206,10 @@ class Tray:
 def probe(devices: list[dict]) -> dict:
     """Read-only self-test. Opens the config interfaces and asks the firmware
     for a feature report; nothing is written to the keyboard."""
-    result = {"config": (False, "Interface not found"), "firmware": (False, "Interface not found")}
+    result = {"config": (False, "Interface not found"), "firmware": (False, "Interface not found"),
+              "polling": (False, "Keyboard not found")}
+    if devices:
+        result["polling"] = polling_rate(devices[0]["vendor_id"], devices[0]["product_id"])
     by_page = {d["usage_page"]: d for d in devices}
     dev = hid.device()
     config = by_page.get(PROTOCOL["config_page"])
@@ -2509,8 +2652,8 @@ class App(ctk.CTk):
             row("USB Device", True, f"{d['vendor_id']:04X}:{d['product_id']:04X}  {d.get('product_string') or ''}  fw {fw >> 8}.{fw & 255:02d}")
         else:
             row("USB Device", False, f"{self.profile['vid'][2:]}:{self.profile['pid'][2:]} not found")
-        for key, label in (("config", "Config Interface"), ("firmware", "Firmware Response")):
-            c = self.checks[key]
+        for key, label in (("config", "Config Interface"), ("firmware", "Firmware Response"), ("polling", "Polling Rate")):
+            c = self.checks.get(key)
             row(label, c[0] if c else None, c[1] if c else "Waiting")
         ch = self.knob_channel
         row("Knob Channel", ch[0] if ch else None, ch[1] if ch else "Waiting")
