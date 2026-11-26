@@ -51,6 +51,90 @@ class Bar(unittest.TestCase):
         self.assertEqual(frame["q"], (5, 5, 5))
 
 
+class Look(unittest.TestCase):
+    """The stand-in for the keyboard's own effect under the bar."""
+
+    LOWER_ROWS = [k for k in s.LiveEffect.CENTERS if k not in s.VOLUME_ROW]
+
+    def look(self, **light):
+        full = {"effect": "wave", "color": s.MULTICOLOR, "brightness": 100, "speed": 50, **light}
+        return s.FirmwareLook(full, {}, 0.0)
+
+    def lit(self, frame):
+        return [k for k in self.LOWER_ROWS if any(frame.get(k, (0, 0, 0)))]
+
+    def test_animated_effects_keep_every_other_key_lit(self):
+        for effect in ("wave", "spectrum"):
+            for color in (s.MULTICOLOR, "#00FF00"):
+                frame = self.look(effect=effect, color=color)(0.3)
+                self.assertGreater(len(self.lit(frame)), len(self.LOWER_ROWS) * 0.8, (effect, color))
+
+    def test_rainbow_wave_has_many_colours(self):
+        frame = self.look(effect="wave")(0.0)
+        self.assertGreater(len({frame[k] for k in self.LOWER_ROWS}), 5)
+
+    def test_static_is_its_colour_everywhere(self):
+        frame = self.look(effect="static", color="#00FFFF")(1.0)
+        self.assertEqual({frame[k] for k in s.LiveEffect.CENTERS}, {(0, 255, 255)})
+
+    def test_static_multicolour_is_red_like_the_keyboard(self):
+        self.assertEqual(self.look(effect="static")(0)["a"], (255, 0, 0))
+
+    def test_brightness_uses_the_keyboard_steps(self):
+        self.assertEqual(self.look(effect="static", color="#FFFFFF", brightness=50)(0)["a"], (128, 128, 128))
+        self.assertEqual(self.look(effect="static", color="#FFFFFF", brightness=0)(0)["a"], (0, 0, 0))
+
+    def test_breathing_rises_and_falls(self):
+        look = self.look(effect="breathing", color="#FF0000")
+        values = [look(t / 10)["a"][0] for t in range(30)]
+        self.assertEqual(min(values), 0)
+        self.assertGreater(max(values), 200)
+
+    def test_reactive_and_off_stay_dark(self):
+        for effect in ("reactive", "off"):
+            self.assertEqual(self.look(effect=effect)(1.0), {})
+
+    def test_custom_uses_the_design(self):
+        look = s.FirmwareLook({"effect": "custom", "color": s.MULTICOLOR, "brightness": 100, "speed": 50},
+                              {"q": "#102030"}, 0.0)
+        self.assertEqual(look(5.0), {"q": (0x10, 0x20, 0x30)})
+
+    def test_bar_still_wins_on_the_top_row(self):
+        bar = s.VolumeBar()
+        bar.show(0.5, False, GREEN)
+        frame = s.StreamFrames(self.look(effect="static", color="#0000FF"), bar).frame(time.monotonic())
+        self.assertEqual([frame[k] for k in s.VOLUME_ROW], [GREEN] * 7 + [(0, 0, 0)] * 7)
+        self.assertEqual(frame["a"], (0, 0, 255))
+
+
+class Watcher(unittest.TestCase):
+    """VolumeWatcher with a fake Windows volume."""
+
+    def test_first_reading_is_a_baseline_then_changes_post(self):
+        readings = iter([0.5, 0.5, 0.7] + [0.7] * 100)
+
+        class Endpoint:
+            def GetMasterVolumeLevelScalar(self):
+                return next(readings)
+
+            def GetMute(self):
+                return 0
+
+        saved = s.AudioUtilities, s.comtypes
+        s.AudioUtilities = type("A", (), {"GetSpeakers": staticmethod(lambda: type("D", (), {"EndpointVolume": Endpoint()})())})
+        s.comtypes = type("C", (), {"CoInitialize": staticmethod(lambda: None), "CoUninitialize": staticmethod(lambda: None)})
+        posts = []
+        try:
+            watcher = s.VolumeWatcher(posts.append)
+            watcher.start()
+            time.sleep(0.5)
+            watcher.stopping = True
+            watcher.join(1)
+        finally:
+            s.AudioUtilities, s.comtypes = saved
+        self.assertEqual(posts[:2], [("volume_baseline", 0.5, False), ("volume", 0.7, False)])
+
+
 class Profiles(unittest.TestCase):
     def test_defaults_and_cleaning(self):
         self.assertFalse(s.default_profile()["volume_bar"])
@@ -186,6 +270,7 @@ class App(unittest.TestCase):
         self.assertEqual(len(FakeStream.made), 1)
         frame = FakeStream.made[0].frames.frame(time.monotonic())
         self.assertEqual(sum(1 for k in s.VOLUME_ROW if frame[k] != (0, 0, 0)), 7)
+        self.assertTrue(any(frame["a"]), "the default Wave must keep the other rows lit")
 
     def test_more_changes_reuse_the_stream(self):
         self.app.on_volume(0.5, False)
@@ -207,6 +292,34 @@ class App(unittest.TestCase):
         self.app.on_volume(0.5, False)
         frame = FakeStream.made[0].frames.frame(time.monotonic())
         self.assertEqual(frame["q"], (0x10, 0x20, 0x30))
+
+    def test_new_colour_shows_on_the_keyboard_at_once(self):
+        self.app.last_volume = (0.5, False)
+        self.app.set_volume_color("#123456")
+        self.assertEqual(self.app.profile["volume_color"], "#123456")
+        frame = FakeStream.made[-1].frames.frame(time.monotonic())
+        self.assertEqual(frame[s.VOLUME_ROW[0]], (0x12, 0x34, 0x56))
+
+    def test_new_colour_without_a_reading_only_saves(self):
+        self.app.last_volume = None
+        self.app.set_volume_color("#123456")
+        self.assertEqual(FakeStream.made, [])
+
+    def test_first_reading_is_remembered_without_a_bar(self):
+        self.app.last_volume = None
+        self.app._handle(("volume_baseline", 0.25, False))
+        self.assertEqual(self.app.last_volume, (0.25, False))
+        self.assertEqual(FakeStream.made, [])
+
+    def test_typed_colour(self):
+        real = s.ctk.CTkInputDialog
+        try:
+            for typed, saved in (("ff6010", "#FF6010"), ("#00aa00", "#00AA00"), ("nope", "#00AA00")):
+                s.ctk.CTkInputDialog = lambda **_kw: type("D", (), {"get_input": lambda self: typed})()
+                self.app.type_volume_color()
+                self.assertEqual(self.app.profile["volume_color"], saved, typed)
+        finally:
+            s.ctk.CTkInputDialog = real
 
     def test_live_effect_draws_the_bar_without_a_second_stream(self):
         self.app.profile["lighting"]["effect"] = "ripple"

@@ -42,7 +42,7 @@ The USB ID is shared by other boards in this family, such as the Weikav Lucky65 
 - **Connection check:** a live status light, a self-test of each interface, and the USB polling rate.
 - **Profiles:** save and load layouts as JSON files.
 - **System tray:** turn on **Minimize To System Tray** on the Settings page, and the minimize button hides the app in the tray. Click the tray icon to bring it back, or right-click it to exit.
-- **Volume bar:** when the volume changes, the number row shows it for a moment, from one key at 1% to all 14 at 100%, and dark when muted.
+- **Volume bar:** when the volume changes, the number row shows it for a moment, from one key at 1% to all 14 at 100%, and dark when muted. The other rows keep your lighting, and the bar can be any colour.
 - **Start with Windows:** open the app automatically when you sign in, hidden in the tray if you like.
 
 ## Good to know

@@ -223,11 +223,14 @@ class App(unittest.TestCase):
     def test_key_press_reaches_the_stream(self):
         self.app.set_light(effect="ripple", color="#00FF00", brightness=100)
         self.settle()
+        before = len(self.streams[-1].packets)
         self.app.live_effect.press_vk(0x41)
         self.spin(0.1)
-        frames = self.streams[-1].packets
-        data = b"".join(p[2:] for p in frames[-5:])
-        self.assertTrue(any(data[3 * position(k) + 1] for k in ("a", "s", "q", "z")))
+        frames = self.streams[-1].packets[before - before % 5:]
+        # Any frame since the press: the ring can pass these keys before the last one.
+        lit = [any(b"".join(p[2:] for p in frames[i:i + 5])[3 * position(k) + 1] for k in ("a", "s", "q", "z"))
+               for i in range(0, len(frames) - 4, 5)]
+        self.assertTrue(any(lit))
 
     def test_switching_back_stops_the_stream_and_writes_the_effect(self):
         self.app.set_light(effect="fade out")

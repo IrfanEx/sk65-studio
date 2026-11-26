@@ -51,7 +51,7 @@ except ImportError:
     comtypes = AudioUtilities = None
 
 APP_NAME = "Womier SK65 Studio"
-APP_VERSION = "1.9.0"  # the release workflow refuses a tag that differs
+APP_VERSION = "1.9.1"  # the release workflow refuses a tag that differs
 
 # Patched by the build script with the detected config interface.
 DEFAULT_VID = "0x0603"
@@ -657,6 +657,64 @@ class VolumeBar:
             return frame
 
 
+class FirmwareLook:
+    """While a stream runs, the keyboard's own effect stops. This draws a stand-in
+    for it, so the keys outside the volume bar stay lit. Its timing is an
+    estimate: the firmware's speeds were never measured."""
+
+    def __init__(self, light: dict, custom_colors: dict, start: float):
+        self.light = dict(light)
+        self.custom = {key: rgb(color) for key, color in custom_colors.items()}
+        self.start = start
+
+    def _color(self):
+        color = self.light["color"]
+        return rgb(color) if color in SWATCHES else None  # None is multicolour
+
+    @staticmethod
+    def _swell(phase: float) -> float:
+        """A one-colour wave's brightness: 30% to 100%, so no key looks switched off."""
+        return 0.65 + 0.35 * math.sin(2 * math.pi * phase)
+
+    def __call__(self, now: float) -> dict:
+        light = self.light
+        effect = light["effect"]
+        level = round(light["brightness"] / 25) / 4  # the firmware has 5 brightness steps
+        t = now - self.start
+        speed = 0.25 + light["speed"] / 100  # cycles per second, roughly
+
+        def scaled(color, amount=1.0):
+            return tuple(round(c * level * amount) for c in color)
+
+        def hue(h):
+            return tuple(round(c * 255) for c in colorsys.hsv_to_rgb(h % 1.0, 1.0, 1.0))
+
+        centers = LiveEffect.CENTERS
+        if effect == "custom":
+            return {key: scaled(color) for key, color in self.custom.items()}
+        if effect == "static":
+            return {key: scaled(self._color() or rgb(SWATCHES[0])) for key in centers}  # no multicolour Fixed-on
+        if effect == "breathing":
+            pulse = 0.5 - 0.5 * math.cos(2 * math.pi * t * speed / 2)
+            color = self._color() or hue(math.floor(t * speed / 2) / 7)  # a new colour each breath
+            return {key: scaled(color, pulse) for key in centers}
+        if effect == "wave":
+            color = self._color()
+            out = {}
+            for key, (x, _y) in centers.items():
+                phase = x / UNITS_W - t * speed / 2
+                out[key] = scaled(hue(phase)) if color is None else scaled(color, self._swell(phase))
+            return out
+        if effect == "spectrum":
+            color = self._color()
+            out = {}
+            for key, (x, y) in centers.items():
+                angle = math.atan2(y - UNITS_H / 2, x - UNITS_W / 2) / (2 * math.pi) - t * speed / 3
+                out[key] = scaled(hue(angle)) if color is None else scaled(color, self._swell(angle))
+            return out
+        return {}  # Reactive lights only pressed keys, and Off is dark
+
+
 class StreamFrames:
     """A stream's frames: a base drawing, with the volume bar on top."""
 
@@ -689,7 +747,9 @@ class VolumeWatcher(threading.Thread):
                     if endpoint is None or time.monotonic() - fetched > 5:  # follows a new default device
                         endpoint, fetched = AudioUtilities.GetSpeakers().EndpointVolume, time.monotonic()
                     value = (round(endpoint.GetMasterVolumeLevelScalar(), 3), bool(endpoint.GetMute()))
-                    if last is not None and value != last:
+                    if last is None:
+                        self.post(("volume_baseline",) + value)
+                    elif value != last:
                         self.post(("volume",) + value)
                     last = value
                 except Exception:  # no audio device, or it went away: try again shortly
@@ -1691,6 +1751,7 @@ class App(ctk.CTk):
         self.live_stream = None
         self.bar = VolumeBar()
         self.bar_stream = None  # streams the bar alone, when no live effect is running
+        self.last_volume = None  # (level, muted) as last read, to preview a new bar colour
         self.volume_watcher = None
         self.engine.on_press = self.live_effect.press_vk
 
@@ -1782,20 +1843,27 @@ class App(ctk.CTk):
         self.profile["volume_color"] = color
         self.save_quiet()
         self.content.invalidate()
+        if self.last_volume:
+            self.on_volume(*self.last_volume)  # show the new colour on the keyboard right away
+
+    def type_volume_color(self):
+        text = ctk.CTkInputDialog(text="Colour code, like #FF6010", title="Volume bar colour").get_input()
+        if text:
+            color = "#" + text.strip().lstrip("#").upper()
+            if valid_color(color):
+                self.set_volume_color(color)
+            else:
+                self.say("That isn't a colour code. Use 6 characters, like #FF6010.")
 
     def on_volume(self, level, muted):
+        self.last_volume = (level, muted)
         if not self.profile["volume_bar"] or not self.connected:
             return
         self.bar.show(level, muted, rgb(self.profile["volume_color"]))
         if self.live_stream or self.bar_stream:
             return  # already streaming: the bar is drawn on the next frame
-        light = self.profile["lighting"]
-        base = {}
-        if light["effect"] == "custom":
-            level_scale = light["brightness"] / 100
-            base = {key: tuple(round(c * level_scale) for c in rgb(color)) for key, color in self.custom_colors().items()}
-        self.bar_stream = LiveStream(StreamFrames(lambda _now: dict(base), self.bar), list(self.devices),
-                                     self.events.put_nowait)
+        base = FirmwareLook(self.profile["lighting"], self.custom_colors(), time.monotonic())
+        self.bar_stream = LiveStream(StreamFrames(base, self.bar), list(self.devices), self.events.put_nowait)
         self.bar_stream.start()
         self.after(200, self._bar_tick)
 
@@ -2053,15 +2121,38 @@ class App(ctk.CTk):
                  "all 14 keys at 100%, one at 1%, none when muted.")
         if self.profile["volume_bar"]:
             _x0, x1, cy = self.control_row(surf, img, w, "Volume Bar Colour")
+            current = self.profile["volume_color"].upper()
+            choices = SWATCHES[::-1] + [VOLUME_DEFAULT_COLOR]
             r = round(12 * S)
             x = x1
-            for c in SWATCHES[::-1] + [VOLUME_DEFAULT_COLOR]:
+            for c in choices:
                 box = (x - r * 2, cy - r, x, cy + r)
-                if self.profile["volume_color"] == c:
+                if current == c:
                     rrect(img, (box[0] - 3, box[1] - 3, box[2] + 3, box[3] + 3), r + 3, LIGHT_GREY)
                 rrect(img, box, r, c)
                 surf.hit(box, lambda _x, _y, col=c: self.set_volume_color(col), key=f"volume {c}", tip=c)
                 x -= r * 2 + round(10 * S)
+            # Any other colour: drag along the rainbow, or type a code.
+            sw, sh = round(130 * S), round(16 * S)
+            sx0 = x - sw
+            img.paste(hue_strip(sw, sh), (sx0, cy - sh // 2))
+            if current not in choices:
+                hue, sat, val = picker_from(current)
+                hx = sx0 + round(hue * sw)
+                ImageDraw.Draw(img).rectangle((hx - 2, cy - sh // 2 - 3, hx + 2, cy + sh // 2 + 3), fill=(255, 255, 255))
+
+            def pick(px, _py):
+                hue = max(0.0, min(0.999, (px - sx0) / sw))
+                red, green, blue = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+                self.set_volume_color(f"#{round(red * 255):02X}{round(green * 255):02X}{round(blue * 255):02X}")
+
+            surf.hit((sx0, cy - round(14 * S), x, cy + round(14 * S)), pick, key="volume hue", drag=True,
+                     tip="Drag along the rainbow for any colour")
+            left = self.option_chips(surf, img, sx0 - round(10 * S), cy, [
+                ("volume type", "Type", False, self.type_volume_color, "Type a colour code, like #FF6010")])
+            if current not in choices:
+                ImageDraw.Draw(img).text((left - round(6 * S), cy), current, fill=rgb(LIGHT_GREY),
+                                         font=font(16 * S), anchor="rm")
         self.control_row(surf, img, w, "Version", APP_VERSION)
 
     def control_row(self, surf, img, w, label, detail=None, color=None, mark=None):
@@ -2956,6 +3047,8 @@ class App(ctk.CTk):
             self.on_written(ev[1], ev[2])
         elif kind == "volume":
             self.on_volume(ev[1], ev[2])
+        elif kind == "volume_baseline":
+            self.last_volume = (ev[1], ev[2])  # no bar: nothing changed yet
         elif kind == "live_error":
             self.stop_bar()
             self.stop_live()
